@@ -6,7 +6,7 @@ This is loosely based on my hacky vim setup using custom plugins and shell scrip
 
 As this is meant for my personal use, documentation is light/non-existant, but you can mostly get by with the navigational hints in the app. If you find it useful, send me a note and I'll add better documentation.
 
-<img width="1470" height="923" src="https://github.com/user-attachments/assets/3e23cf8b-6634-4abc-80dd-085e338bcb0f" />
+<img width="1470" height="923" src="https://github.com/user-attachments/assets/bf53a934-d341-41f2-b559-70023b683cee" />
 
 
 ## Installation
