@@ -19,7 +19,7 @@ use crossterm::{
 use ratatui::{backend::CrosstermBackend, Terminal};
 
 use app::App;
-use store::{FlatFileStore, Store};
+use store::SqliteStore;
 
 fn main() -> Result<()> {
     // Parse CLI args
@@ -31,8 +31,10 @@ fn main() -> Result<()> {
     }
 
     let cfg = config::load()?;
-    let store = Arc::new(FlatFileStore::new(&cfg.data_dir)?);
-    store.rebuild_index()?;
+    let db_path = cfg.data_dir.join("crumbs.db");
+    // Ensure data dir exists
+    std::fs::create_dir_all(&cfg.data_dir)?;
+    let store = Arc::new(SqliteStore::new(&db_path)?);
 
     // Terminal setup
     enable_raw_mode()?;

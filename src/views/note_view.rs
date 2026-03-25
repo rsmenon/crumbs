@@ -111,7 +111,7 @@ impl NoteView {
             notes.retain(|n| !n.archived);
         }
         if let Some(ref tag) = self.tag_filter {
-            notes.retain(|n| n.refs.topics.iter().any(|t| t == tag));
+            notes.retain(|n| n.refs.tags.iter().any(|t| t == tag));
         }
         self.notes = notes;
         self.sort_notes();
@@ -141,8 +141,8 @@ impl NoteView {
             }
             Column::Tags => {
                 self.notes.sort_by(|a, b| {
-                    let tag_a = a.refs.topics.first().map(|t| t.to_lowercase());
-                    let tag_b = b.refs.topics.first().map(|t| t.to_lowercase());
+                    let tag_a = a.refs.tags.first().map(|t| t.to_lowercase());
+                    let tag_b = b.refs.tags.first().map(|t| t.to_lowercase());
                     // no-tags always last regardless of direction
                     if tag_a.is_none() && tag_b.is_some() {
                         return std::cmp::Ordering::Greater;
@@ -182,7 +182,7 @@ impl NoteView {
                 Column::Title => note.title.clone(),
                 Column::Tags => {
                     let mut parts = Vec::new();
-                    for t in &note.refs.topics {
+                    for t in &note.refs.tags {
                         parts.push(format!("#{}", t));
                     }
                     parts.join(" ")
@@ -223,7 +223,7 @@ impl NoteView {
                     }
                 }
                 note.refs.people = people;
-                note.refs.topics = topics;
+                note.refs.tags = topics;
             }
             Column::Modified => {
                 // Modified is read-only; ignore edits
@@ -272,7 +272,7 @@ impl NoteView {
 
     fn annotated_tags<'a>(note: &Note, theme: &'a Theme) -> Vec<Span<'a>> {
         let mut spans = Vec::new();
-        for t in &note.refs.topics {
+        for t in &note.refs.tags {
             if !spans.is_empty() {
                 spans.push(Span::raw(" "));
             }
@@ -772,7 +772,7 @@ impl NoteView {
                 } else {
                     // Render tags with annotation + padding
                     let mut tags_str = String::new();
-                    for t in &note.refs.topics {
+                    for t in &note.refs.tags {
                         if !tags_str.is_empty() {
                             tags_str.push(' ');
                         }
@@ -787,7 +787,7 @@ impl NoteView {
                 // Build annotated tag spans
                 let mut tag_parts: Vec<Span> = Vec::new();
                 let mut tag_len = 0usize;
-                for t in &note.refs.topics {
+                for t in &note.refs.tags {
                     let s = format!("#{}", t);
                     tag_len += s.len() + 1;
                     if !tag_parts.is_empty() {

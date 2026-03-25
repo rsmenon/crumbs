@@ -350,31 +350,26 @@ impl App {
             KeyCode::Char('D') => {
                 self.active_tab = ActiveTab::Dashboard;
                 self.close_overlays();
-                let _ = self.store.rebuild_index();
                 self.broadcast_message(&AppMessage::Reload);
             }
             KeyCode::Char('T') => {
                 self.active_tab = ActiveTab::Tasks;
                 self.close_overlays();
-                let _ = self.store.rebuild_index();
                 self.broadcast_message(&AppMessage::Reload);
             }
             KeyCode::Char('C') => {
                 self.active_tab = ActiveTab::Calendar;
                 self.close_overlays();
-                let _ = self.store.rebuild_index();
                 self.broadcast_message(&AppMessage::Reload);
             }
             KeyCode::Char('N') => {
                 self.active_tab = ActiveTab::Notes;
                 self.close_overlays();
-                let _ = self.store.rebuild_index();
                 self.broadcast_message(&AppMessage::Reload);
             }
             KeyCode::Char('P') => {
                 self.active_tab = ActiveTab::People;
                 self.close_overlays();
-                let _ = self.store.rebuild_index();
                 self.broadcast_message(&AppMessage::Reload);
             }
             KeyCode::Char('?') => {
@@ -500,12 +495,10 @@ impl App {
             AppMessage::EditorClosed => {
                 self.show_editor = false;
                 self.editor = None;
-                let _ = self.store.rebuild_index();
                 self.broadcast_message(&AppMessage::Reload);
                 None
             }
             AppMessage::Reload => {
-                let _ = self.store.rebuild_index();
                 self.broadcast_message(&AppMessage::Reload);
                 None
             }
@@ -535,19 +528,11 @@ impl App {
                 self.show_search = false;
                 self.close_overlays();
                 match eref.kind {
-                    EntityKind::Todo => {
-                        self.active_tab = ActiveTab::Tasks;
-                        self.tasks_tab.handle_message(&AppMessage::Reload);
-                    }
-                    EntityKind::Reminder => {
-                        self.active_tab = ActiveTab::Dashboard;
-                        self.dashboard.handle_message(&AppMessage::Reload);
-                    }
                     EntityKind::Agenda => {
                         self.active_tab = ActiveTab::People;
                         self.people.handle_message(&AppMessage::Reload);
                     }
-                    EntityKind::Topic => {
+                    EntityKind::Tag => {
                         self.active_tab = ActiveTab::Tasks;
                         self.tasks_tab.handle_message(&AppMessage::Reload);
                     }
@@ -732,7 +717,6 @@ impl App {
                 if let Some(AppMessage::EditorClosed) = editor.poll() {
                     self.show_editor = false;
                     self.editor = None;
-                    let _ = self.store.rebuild_index();
                     self.broadcast_message(&AppMessage::Reload);
                 }
             }

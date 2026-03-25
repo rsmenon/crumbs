@@ -1,9 +1,7 @@
-pub mod flatfile;
-pub mod index;
-pub mod fts;
 pub mod io;
+pub mod sqlite;
 
-pub use flatfile::FlatFileStore;
+pub use sqlite::SqliteStore;
 
 use anyhow::Result;
 use crate::domain::*;
@@ -11,7 +9,7 @@ use crate::domain::*;
 /// Core persistence trait.
 ///
 /// All data access goes through this trait so that views and the app
-/// are decoupled from the concrete file-system layout.
+/// are decoupled from the concrete storage implementation.
 #[allow(unused)]
 pub trait Store: Send + Sync {
     // ── Tasks ────────────────────────────────────────────────────
@@ -20,20 +18,6 @@ pub trait Store: Send + Sync {
     fn list_tasks(&self) -> Result<Vec<Task>>;
     fn save_task(&self, task: &Task) -> Result<()>;
     fn delete_task(&self, id: &str) -> Result<()>;
-
-    // ── Todos ────────────────────────────────────────────────────
-
-    fn get_todo(&self, id: &str) -> Result<Todo>;
-    fn list_todos(&self) -> Result<Vec<Todo>>;
-    fn save_todo(&self, todo: &Todo) -> Result<()>;
-    fn delete_todo(&self, id: &str) -> Result<()>;
-
-    // ── Reminders ────────────────────────────────────────────────
-
-    fn get_reminder(&self, id: &str) -> Result<Reminder>;
-    fn list_reminders(&self) -> Result<Vec<Reminder>>;
-    fn save_reminder(&self, reminder: &Reminder) -> Result<()>;
-    fn delete_reminder(&self, id: &str) -> Result<()>;
 
     // ── Notes ────────────────────────────────────────────────────
 
@@ -49,12 +33,12 @@ pub trait Store: Send + Sync {
     fn save_person(&self, person: &Person) -> Result<()>;
     fn delete_person(&self, slug: &str) -> Result<()>;
 
-    // ── Topics ───────────────────────────────────────────────────
+    // ── Tags ─────────────────────────────────────────────────────
 
-    fn get_topic(&self, slug: &str) -> Result<Topic>;
-    fn list_topics(&self) -> Result<Vec<Topic>>;
-    fn save_topic(&self, topic: &Topic) -> Result<()>;
-    fn delete_topic(&self, slug: &str) -> Result<()>;
+    fn get_tag(&self, slug: &str) -> Result<Tag>;
+    fn list_tags(&self) -> Result<Vec<Tag>>;
+    fn save_tag(&self, tag: &Tag) -> Result<()>;
+    fn delete_tag(&self, slug: &str) -> Result<()>;
 
     // ── Agendas ─────────────────────────────────────────────────
 

@@ -2,7 +2,7 @@ use chrono::NaiveDate;
 
 use super::datetime::parse_datetime;
 use super::mention::extract_mentions;
-use super::topic::extract_topics;
+use super::tag::extract_tags;
 
 /// The classified type of a sink entry.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -20,8 +20,8 @@ pub struct ParsedSink {
     pub entry_type: SinkEntryType,
     /// Extracted @people references (lowercase slugs, deduplicated).
     pub people: Vec<String>,
-    /// Extracted #topic references (lowercase slugs, deduplicated).
-    pub topics: Vec<String>,
+    /// Extracted #tag references (lowercase slugs, deduplicated).
+    pub tags: Vec<String>,
     /// A parsed date, if one was detected.
     pub datetime: Option<NaiveDate>,
     /// The body text with any type prefix and date expression removed.
@@ -49,12 +49,12 @@ pub fn parse_sink(input: &str) -> ParsedSink {
     };
 
     let people = extract_mentions(&body);
-    let topics = extract_topics(&body);
+    let tags = extract_tags(&body);
 
     ParsedSink {
         entry_type,
         people,
-        topics,
+        tags,
         datetime,
         body: body.trim().to_string(),
     }
@@ -85,7 +85,7 @@ mod tests {
         assert_eq!(p.body, "just a thought");
         assert!(p.datetime.is_none());
         assert!(p.people.is_empty());
-        assert!(p.topics.is_empty());
+        assert!(p.tags.is_empty());
     }
 
     #[test]
@@ -133,14 +133,14 @@ mod tests {
         let p = parse_sink("todo: ask @alice about #project");
         assert_eq!(p.entry_type, SinkEntryType::Todo);
         assert_eq!(p.people, vec!["alice"]);
-        assert_eq!(p.topics, vec!["project"]);
+        assert_eq!(p.tags, vec!["project"]);
     }
 
     #[test]
     fn multiple_mentions_and_topics() {
         let p = parse_sink("sync with @alice and @bob on #rsm #rust");
         assert_eq!(p.people, vec!["alice", "bob"]);
-        assert_eq!(p.topics, vec!["rsm", "rust"]);
+        assert_eq!(p.tags, vec!["rsm", "rust"]);
     }
 
     #[test]

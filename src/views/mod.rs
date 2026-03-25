@@ -108,12 +108,11 @@ pub fn detect_private(text: &str) -> (String, bool) {
 /// Nerd Font icons used throughout the UI.
 pub mod icons {
     pub const TASK: &str = "\u{f0131}";    // 󰄱  nf-md-checkbox_blank_outline
-    pub const TODO: &str = "\u{f0132}";    // 󰄲  nf-md-checkbox_marked
     pub const NOTE: &str = "\u{f0219}";    // 󰈙  nf-md-file_document
-    pub const REMINDER: &str = "\u{f0954}"; // 󰥔  nf-md-clock_alert_outline
     pub const CALENDAR: &str = "\u{f00ed}"; // 󰃭  nf-md-calendar
     pub const MEMORY: &str = "\u{f0004}";  // 󰀄  nf-md-account
     pub const AGENDA: &str = "\u{f03ea}";    // 󰏪  nf-md-pencil
+    pub const TAG: &str = "\u{f02c}";       // tag icon
     pub const ARCHIVE: &str = "⊟";           // archived indicator
     pub const PIN: &str = "※";               // reference mark
     pub const BODY: &str = "≡";             // three horizontal bars

@@ -10,7 +10,7 @@ use ratatui::Frame;
 
 use crate::app::message::AppMessage;
 use crate::app::theme::Theme;
-use crate::domain::{new_id, Note, Person, Refs, Task, TaskStatus, Topic};
+use crate::domain::{new_id, Note, Person, Refs, Tag, Task, TaskStatus};
 use crate::parser::{parse_sink, SinkEntryType};
 use crate::store::Store;
 use crate::views::detect_private;
@@ -82,7 +82,7 @@ impl SinkOverlay {
 
         self.known_topics = self
             .store
-            .list_topics()
+            .list_tags()
             .unwrap_or_default()
             .into_iter()
             .map(|t| t.slug)
@@ -245,7 +245,7 @@ impl SinkOverlay {
 
         let refs = Refs {
             people: parsed.people.clone(),
-            topics: parsed.topics.clone(),
+            tags: parsed.tags.clone(),
             ..Default::default()
         };
 
@@ -316,9 +316,9 @@ impl SinkOverlay {
                     note.refs.people.push(person.clone());
                 }
             }
-            for topic in &parsed.topics {
-                if !note.refs.topics.contains(topic) {
-                    note.refs.topics.push(topic.clone());
+            for topic in &parsed.tags {
+                if !note.refs.tags.contains(topic) {
+                    note.refs.tags.push(topic.clone());
                 }
             }
 
@@ -339,22 +339,17 @@ impl SinkOverlay {
                     pinned: false,
                     archived: false,
                     metadata: Default::default(),
-                    tags: Vec::new(),
                 };
                 let _ = self.store.save_person(&person);
             }
         }
-        for slug in &parsed.topics {
-            if self.store.get_topic(slug).is_err() {
-                let topic = Topic {
+        for slug in &parsed.tags {
+            if self.store.get_tag(slug).is_err() {
+                let tag = Tag {
                     slug: slug.clone(),
-                    display_name: String::new(),
-                    aliases: Vec::new(),
                     created_at: now,
-                    description: String::new(),
-                    metadata: Default::default(),
                 };
-                let _ = self.store.save_topic(&topic);
+                let _ = self.store.save_tag(&tag);
             }
         }
 

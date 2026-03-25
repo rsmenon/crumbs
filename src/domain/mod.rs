@@ -1,11 +1,9 @@
 mod id;
 mod refs;
 mod task;
-mod todo;
 mod note;
-mod reminder;
 mod person;
-mod topic;
+mod tag;
 mod agenda;
 
 /// Helper used by `#[serde(skip_serializing_if)]` across domain types.
@@ -58,10 +56,8 @@ pub(crate) mod naive_date_fmt {
 
 pub use id::new_id;
 pub use refs::{EntityKind, EntityRef, Refs};
-pub use task::{Priority, Task, TaskStatus};
-pub use todo::Todo;
+pub use task::{Priority, StatusChange, Task, TaskStatus};
 pub use note::Note;
-pub use reminder::Reminder;
 pub use person::Person;
-pub use topic::Topic;
+pub use tag::Tag;
 pub use agenda::Agenda;

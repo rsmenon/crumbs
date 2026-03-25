@@ -13,7 +13,7 @@ use ratatui::Frame;
 use crate::app::message::AppMessage;
 use crate::app::theme::Theme;
 use crate::domain::EntityKind;
-use crate::parser::{extract_mentions, extract_topics};
+use crate::parser::{extract_mentions, extract_tags};
 use crate::store::Store;
 use super::nvim_bridge::{key_to_nvim_input, NvimBridge};
 
@@ -164,39 +164,35 @@ impl NvimOverlay {
     }
 
     fn save_note(&self) {
-        // Parse the full file so front-matter edits (including refs.topics) are honoured.
+        // Parse the temp file so front-matter edits (including refs.tags) are honoured.
         let Ok(mut note) = crate::store::io::parse_note(&self.file_path) else { return };
         note.updated_at = chrono::Utc::now();
 
-        // Also merge any new @mentions / #topics written inline in the body.
+        // Also merge any new @mentions / #tags written inline in the body.
         let body = note.body.clone();
         for m in extract_mentions(&body) {
             if !note.refs.people.contains(&m) {
                 note.refs.people.push(m);
             }
         }
-        for t in extract_topics(&body) {
-            if !note.refs.topics.contains(&t) {
-                note.refs.topics.push(t);
+        for t in extract_tags(&body) {
+            if !note.refs.tags.contains(&t) {
+                note.refs.tags.push(t);
             }
         }
 
         let _ = self.store.save_note(&note);
-        let _ = self.store.rebuild_index();
     }
 
     fn save_task(&self) {
         let Ok(content) = std::fs::read_to_string(&self.file_path) else { return };
-        let json_path = self.data_dir.join("tasks").join(format!("{}.json", self.entity_id));
-        let _ = apply_task_frontmatter(&content, &json_path);
-        let _ = self.store.rebuild_index();
+        let _ = self.apply_task_frontmatter_to_store(&content);
     }
 
     fn save_agenda(&self) {
         let Ok(mut agenda) = crate::store::io::parse_agenda(&self.file_path) else { return };
         agenda.updated_at = chrono::Utc::now();
         let _ = self.store.save_agenda(&agenda);
-        let _ = self.store.rebuild_index();
     }
 
     fn cleanup(&self) {
@@ -206,6 +202,74 @@ impl NvimOverlay {
             let _ = std::fs::remove_file(&self.file_path);
         }
     }
+
+    /// Parse the temp .md front matter and save the task back through the store.
+    fn apply_task_frontmatter_to_store(&self, content: &str) -> anyhow::Result<()> {
+        if !content.starts_with("---\n") {
+            return Ok(());
+        }
+        let rest = &content[4..];
+        let end_idx = rest.find("\n---\n").ok_or_else(|| anyhow::anyhow!("missing fm end"))?;
+
+        let fm_text = &rest[..end_idx];
+        let body = rest[end_idx + 5..].trim();
+
+        let mut task = self.store.get_task(&self.entity_id)?;
+
+        for line in fm_text.lines() {
+            let line = line.trim();
+            let Some(colon) = line.find(':') else { continue };
+            let key = line[..colon].trim();
+            let val = line[colon + 1..].trim();
+
+            match key {
+                "title" => {
+                    task.title = val.to_string();
+                }
+                "status" => {
+                    if let Some(s) = crate::domain::TaskStatus::from_str_loose(val) {
+                        task.status = s;
+                    }
+                }
+                "due_date" => {
+                    if val.is_empty() || val == "null" {
+                        task.due_date = None;
+                    } else {
+                        task.due_date = chrono::NaiveDate::parse_from_str(val, "%Y-%m-%d").ok();
+                    }
+                }
+                "priority" => {
+                    task.priority = match val.to_lowercase().as_str() {
+                        "low" => crate::domain::Priority::Low,
+                        "medium" | "med" => crate::domain::Priority::Medium,
+                        "high" => crate::domain::Priority::High,
+                        _ => crate::domain::Priority::None,
+                    };
+                }
+                "private" => {
+                    task.private = val == "true";
+                }
+                "tags" => {
+                    task.refs.tags = val
+                        .split_whitespace()
+                        .filter(|s| !s.is_empty())
+                        .map(|s| s.trim_start_matches('#').to_string())
+                        .collect();
+                }
+                _ => {} // id, created_at, updated_at are read-only
+            }
+        }
+
+        if !body.is_empty() {
+            task.description = body.to_string();
+        } else {
+            task.description = String::new();
+        }
+        task.updated_at = chrono::Utc::now();
+
+        self.store.save_task(&task)?;
+        Ok(())
+    }
 }
 
 // ── File preparation ──────────────────────────────────────────────
@@ -214,31 +278,40 @@ fn prepare_file(
     entity_id: &str,
     entity_kind: &EntityKind,
     store: &Arc<dyn Store>,
-    data_dir: &Path,
+    _data_dir: &Path,
 ) -> anyhow::Result<(PathBuf, bool)> {
     match entity_kind {
         EntityKind::Note => {
-            let path = data_dir.join("notes").join(format!("{}.md", entity_id));
-            if !path.exists() {
-                // Create a template so nvim has something to edit.
-                if let Some(parent) = path.parent() {
-                    std::fs::create_dir_all(parent)?;
+            // Notes now use temp files like tasks/agendas.
+            let note = match store.get_note(entity_id) {
+                Ok(n) => n,
+                Err(_) => {
+                    // Create a blank note template
+                    let now = chrono::Utc::now();
+                    crate::domain::Note {
+                        id: entity_id.to_string(),
+                        title: String::new(),
+                        created_at: now,
+                        updated_at: now,
+                        private: false,
+                        pinned: false,
+                        archived: false,
+                        created_dir: std::env::current_dir()
+                            .map(|d| d.display().to_string())
+                            .unwrap_or_default(),
+                        refs: crate::domain::Refs::default(),
+                        body: String::new(),
+                    }
                 }
-                let now = chrono::Utc::now().to_rfc3339();
-                let dir = std::env::current_dir()
-                    .map(|d| d.display().to_string())
-                    .unwrap_or_default();
-                let tmpl = format!(
-                    "---\nid: {entity_id}\ntitle: \ncreated_at: {now}\nupdated_at: {now}\ncreated_dir: {dir}\nrefs:\n  people: []\n  topics: []\n---\n\n"
-                );
-                std::fs::write(&path, tmpl)?;
-            }
-            Ok((path, false))
+            };
+            let tmp_path = std::env::temp_dir().join(format!("crumbs-note-{entity_id}.md"));
+            crate::store::io::write_note(&tmp_path, &note)?;
+            Ok((tmp_path, true))
         }
         EntityKind::Task => {
-            let path = data_dir.join("tasks").join(format!("{}.md", entity_id));
             let task = store.get_task(entity_id)?;
-            let tags_str = task.refs.topics.join(" ");
+            let tags_str = task.refs.tags.join(" ");
+            let tmp_path = std::env::temp_dir().join(format!("crumbs-task-{entity_id}.md"));
             let content = format!(
                 "---\nid: {}\ntitle: {}\nstatus: {}\ndue_date: {}\npriority: {}\nprivate: {}\ntags: {}\ncreated_at: {}\nupdated_at: {}\n---\n\n{}",
                 task.id,
@@ -252,98 +325,16 @@ fn prepare_file(
                 task.updated_at.to_rfc3339(),
                 task.description,
             );
-            if let Some(parent) = path.parent() {
-                std::fs::create_dir_all(parent)?;
-            }
-            std::fs::write(&path, content)?;
-            Ok((path, true))
+            std::fs::write(&tmp_path, content)?;
+            Ok((tmp_path, true))
         }
         EntityKind::Agenda => {
             let agenda = store.get_agenda(entity_id)?;
-            // Write full frontmatter+body to a temp file (like notes) so the
-            // user can edit metadata fields.  The store's canonical .md is left
-            // untouched; save_agenda() parses this temp file and writes back
-            // through the store on every :w.
             let tmp_path = std::env::temp_dir().join(format!("crumbs-agenda-{entity_id}.md"));
             crate::store::io::write_agenda(&tmp_path, &agenda)?;
             Ok((tmp_path, true))
         }
         _ => Err(anyhow::anyhow!("unsupported entity kind for nvim overlay")),
     }
-}
-
-// ── Parse helpers ─────────────────────────────────────────────────
-
-/// Parse a task's temp `.md` front matter and apply changes to the task's
-/// `.json` file on disk.
-fn apply_task_frontmatter(content: &str, json_path: &Path) -> anyhow::Result<()> {
-    if !content.starts_with("---\n") {
-        return Ok(());
-    }
-    let rest = &content[4..];
-    let end_idx = rest.find("\n---\n").ok_or_else(|| anyhow::anyhow!("missing fm end"))?;
-
-    let fm_text = &rest[..end_idx];
-    let body = rest[end_idx + 5..].trim();
-
-    let raw = std::fs::read_to_string(json_path)?;
-    let mut task: serde_json::Value = serde_json::from_str(&raw)?;
-
-    for line in fm_text.lines() {
-        let line = line.trim();
-        let Some(colon) = line.find(':') else { continue };
-        let key = line[..colon].trim();
-        let val = line[colon + 1..].trim();
-
-        match key {
-            "title" => {
-                task["title"] = serde_json::Value::String(val.to_string());
-            }
-            "status" => {
-                let normalized = crate::domain::TaskStatus::from_str_loose(val)
-                    .map(|s| s.as_str().to_string())
-                    .unwrap_or_else(|| val.to_string());
-                task["status"] = serde_json::Value::String(normalized);
-            }
-            "due_date" => {
-                if val.is_empty() || val == "null" {
-                    task.as_object_mut().map(|m| m.remove("due_date"));
-                } else {
-                    task["due_date"] = serde_json::Value::String(val.to_string());
-                }
-            }
-            "priority" => {
-                task["priority"] = serde_json::Value::String(val.to_string());
-            }
-            "private" => {
-                task["private"] = serde_json::Value::Bool(val == "true");
-            }
-            "tags" => {
-                let topics: serde_json::Value = val
-                    .split_whitespace()
-                    .filter(|s| !s.is_empty())
-                    .map(|s| serde_json::Value::String(s.trim_start_matches('#').to_string()))
-                    .collect::<Vec<_>>()
-                    .into();
-                if let Some(refs) = task.get_mut("refs") {
-                    refs["topics"] = topics;
-                } else {
-                    task["refs"] = serde_json::json!({ "topics": topics });
-                }
-            }
-            _ => {} // id, created_at, updated_at are read-only
-        }
-    }
-
-    if !body.is_empty() {
-        task["description"] = serde_json::Value::String(body.to_string());
-    } else {
-        task.as_object_mut().map(|m| m.remove("description"));
-    }
-    task["updated_at"] = serde_json::Value::String(chrono::Utc::now().to_rfc3339());
-
-    let data = serde_json::to_string_pretty(&task)?;
-    std::fs::write(json_path, data)?;
-    Ok(())
 }
 

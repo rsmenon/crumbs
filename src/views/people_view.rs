@@ -97,8 +97,6 @@ impl TimelineItem {
     fn icon(&self) -> &'static str {
         match self.kind {
             EntityKind::Task => icons::TASK,
-            EntityKind::Todo => icons::TODO,
-            EntityKind::Reminder => icons::REMINDER,
             EntityKind::Note => icons::NOTE,
             EntityKind::Agenda => icons::AGENDA,
             _ => icons::TASK,
@@ -197,12 +195,8 @@ impl PeopleView {
                 if p.archived && !self.show_archived {
                     continue;
                 }
-                // Apply global tag filter: people must have matching tag
-                if let Some(ref tag) = self.tag_filter {
-                    if !p.tags.iter().any(|t| t == tag) {
-                        continue;
-                    }
-                }
+                // Tag filter skipped for people (no direct tags field)
+                // People are always shown regardless of tag filter.
                 self.people.push(p);
             }
         }
@@ -226,7 +220,6 @@ impl PeopleView {
             pinned: false,
             archived: false,
             metadata: Default::default(),
-            tags: Vec::new(),
         };
         let _ = self.store.save_person(&person);
         // Add directly to list (reload would filter out people without refs)
@@ -295,15 +288,15 @@ impl PeopleView {
             }
             (Some(AgendaColumn::Tags), Some(SortDirection::Ascending)) => {
                 self.agendas.sort_by(|a, b| {
-                    let ta = a.refs.topics.first().map(|s| s.as_str()).unwrap_or("");
-                    let tb = b.refs.topics.first().map(|s| s.as_str()).unwrap_or("");
+                    let ta = a.refs.tags.first().map(|s| s.as_str()).unwrap_or("");
+                    let tb = b.refs.tags.first().map(|s| s.as_str()).unwrap_or("");
                     ta.cmp(tb)
                 });
             }
             (Some(AgendaColumn::Tags), Some(SortDirection::Descending)) => {
                 self.agendas.sort_by(|a, b| {
-                    let ta = a.refs.topics.first().map(|s| s.as_str()).unwrap_or("");
-                    let tb = b.refs.topics.first().map(|s| s.as_str()).unwrap_or("");
+                    let ta = a.refs.tags.first().map(|s| s.as_str()).unwrap_or("");
+                    let tb = b.refs.tags.first().map(|s| s.as_str()).unwrap_or("");
                     tb.cmp(ta)
                 });
             }
@@ -324,7 +317,7 @@ impl PeopleView {
 
         let refs = self.store.get_memory(&person.slug);
         for eref in &refs {
-            if matches!(eref.kind, EntityKind::Person | EntityKind::Topic) {
+            if matches!(eref.kind, EntityKind::Person | EntityKind::Tag) {
                 continue;
             }
             if let Some(item) = self.resolve_entity_ref(eref) {
@@ -352,37 +345,6 @@ impl PeopleView {
                         date,
                         private: t.private,
                         done: t.status == TaskStatus::Done,
-                    });
-                }
-            }
-            EntityKind::Todo => {
-                let id = eref.id.clone();
-                if let Ok(td) = self.store.get_todo(&id) {
-                    let date = td.due_date.map(|d| d.format("%Y-%m-%d").to_string()).unwrap_or_else(|| {
-                        let local: chrono::DateTime<chrono::Local> = td.created_at.into();
-                        local.format("%Y-%m-%d").to_string()
-                    });
-                    return Some(TimelineItem {
-                        id: td.id.clone(),
-                        kind: EntityKind::Todo,
-                        title: td.title.clone(),
-                        date,
-                        private: false,
-                        done: td.done,
-                    });
-                }
-            }
-            EntityKind::Reminder => {
-                let id = eref.id.clone();
-                if let Ok(r) = self.store.get_reminder(&id) {
-                    let local: chrono::DateTime<chrono::Local> = r.remind_at.into();
-                    return Some(TimelineItem {
-                        id: r.id.clone(),
-                        kind: EntityKind::Reminder,
-                        title: r.title.clone(),
-                        date: local.format("%Y-%m-%d").to_string(),
-                        private: false,
-                        done: r.dismissed,
                     });
                 }
             }
@@ -503,11 +465,7 @@ impl PeopleView {
             for (k, v) in &person.metadata {
                 existing.metadata.entry(k.clone()).or_insert_with(|| v.clone());
             }
-            for tag in &person.tags {
-                if !existing.tags.contains(tag) {
-                    existing.tags.push(tag.clone());
-                }
-            }
+            // Person no longer has a tags field; nothing to merge.
             let _ = self.store.save_person(&existing);
             // Delete the auto-generated person
             let _ = self.store.delete_person(&old_slug);
@@ -629,7 +587,7 @@ impl PeopleView {
         self.agenda_input = match self.agenda_edit_col {
             AgendaColumn::Date  => agenda.date.format("%Y-%m-%d").to_string(),
             AgendaColumn::Title => agenda.title.clone(),
-            AgendaColumn::Tags  => agenda.refs.topics.iter()
+            AgendaColumn::Tags  => agenda.refs.tags.iter()
                 .map(|t| format!("#{}", t))
                 .collect::<Vec<_>>()
                 .join(" "),
@@ -658,7 +616,7 @@ impl PeopleView {
                 }
             }
             AgendaColumn::Tags => {
-                agenda.refs.topics = self.agenda_input.split_whitespace()
+                agenda.refs.tags = self.agenda_input.split_whitespace()
                     .map(|s| s.trim_start_matches('#').to_lowercase())
                     .filter(|s| !s.is_empty())
                     .collect();
@@ -1165,9 +1123,8 @@ impl PeopleView {
                                 let item_kind = item.kind.clone();
                                 match item_kind {
                                     EntityKind::Task => { let _ = self.store.delete_task(&item_id); }
-                                    EntityKind::Todo => { let _ = self.store.delete_todo(&item_id); }
                                     EntityKind::Note => { let _ = self.store.delete_note(&item_id); }
-                                    EntityKind::Reminder => { let _ = self.store.delete_reminder(&item_id); }
+                                    EntityKind::Agenda => { let _ = self.store.delete_agenda(&item_id); }
                                     _ => {}
                                 }
                                 self.reload();
@@ -1482,7 +1439,7 @@ impl PeopleView {
                     format!("{:<width$}", truncate(&agenda.title, title_w), width = title_w)
                 };
 
-                let tags_str = agenda.refs.topics.iter()
+                let tags_str = agenda.refs.tags.iter()
                     .map(|t| format!("#{}", t))
                     .collect::<Vec<_>>()
                     .join(" ");

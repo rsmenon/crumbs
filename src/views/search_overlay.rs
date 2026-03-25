@@ -138,31 +138,20 @@ impl SearchOverlay {
         match eref.kind {
             EntityKind::Task => {
                 self.store.get_task(&id)
-                    .map(|t| t.refs.topics.iter().any(|tg| tg == tag))
+                    .map(|t| t.refs.tags.iter().any(|tg| tg == tag))
                     .unwrap_or(false)
             }
             EntityKind::Note => {
                 self.store.get_note(&id)
-                    .map(|n| n.refs.topics.iter().any(|tg| tg == tag))
-                    .unwrap_or(false)
-            }
-            EntityKind::Todo => {
-                self.store.get_todo(&id)
-                    .map(|t| t.refs.topics.iter().any(|tg| tg == tag))
-                    .unwrap_or(false)
-            }
-            EntityKind::Reminder => {
-                self.store.get_reminder(&id)
-                    .map(|r| r.refs.topics.iter().any(|tg| tg == tag))
+                    .map(|n| n.refs.tags.iter().any(|tg| tg == tag))
                     .unwrap_or(false)
             }
             EntityKind::Person => {
-                self.store.get_person(&id)
-                    .map(|p| p.tags.iter().any(|t| t == tag))
-                    .unwrap_or(false)
+                // People don't have a direct tags field; skip tag filtering for them.
+                false
             }
-            EntityKind::Topic => {
-                // Topics match if their slug is the filter tag
+            EntityKind::Tag => {
+                // Tags match if their slug is the filter tag
                 id == tag
             }
             _ => false,
@@ -204,29 +193,15 @@ impl SearchOverlay {
                 };
                 (icons::NOTE, title, date)
             }
-            EntityKind::Todo => {
-                let todo = self.store.get_todo(&id).ok()?;
-                let date = todo
-                    .due_date
-                    .as_ref()
-                    .map(|d| fmt_date(d))
-                    .unwrap_or_else(|| fmt_utc(&todo.created_at));
-                (icons::TODO, todo.title, date)
-            }
-            EntityKind::Reminder => {
-                let rem = self.store.get_reminder(&id).ok()?;
-                let date = fmt_utc(&rem.remind_at);
-                (icons::REMINDER, rem.title, date)
-            }
             EntityKind::Person => {
                 let p = self.store.get_person(&id).ok()?;
                 let date = fmt_utc(&p.created_at);
                 (icons::MEMORY, format!("@{}", p.slug), date)
             }
-            EntityKind::Topic => {
-                let t = self.store.get_topic(&id).ok()?;
+            EntityKind::Tag => {
+                let t = self.store.get_tag(&id).ok()?;
                 let date = fmt_utc(&t.created_at);
-                (icons::MEMORY, format!("#{}", t.slug), date)
+                (icons::TAG, format!("#{}", t.slug), date)
             }
             EntityKind::Agenda => {
                 let a = self.store.get_agenda(&id).ok()?;

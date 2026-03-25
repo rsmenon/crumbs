@@ -11,7 +11,7 @@ use ratatui::Frame;
 
 use crate::app::message::{AppMessage, DatePickerContext};
 use crate::app::theme::Theme;
-use crate::domain::{Agenda, EntityKind, EntityRef, Note, Priority, Reminder, Task, TaskStatus, Todo};
+use crate::domain::{Agenda, EntityKind, EntityRef, Note, Priority, Task, TaskStatus};
 use crate::store::Store;
 use crate::util::calendar::{month_grid, weekday_headers};
 use crate::util::date_format::{format_date, format_utc_date};
@@ -50,10 +50,7 @@ enum DetailField {
     // agenda
     Date,
     Person,
-    // todo
-    Done,
-    // reminder
-    RemindAt,
+    // (Done and RemindAt removed with Todo/Reminder entities)
     // shared (shown for tasks + notes)
     People,
     Dir,
@@ -79,8 +76,6 @@ struct FieldRow {
 enum LoadedEntity {
     Task(Task),
     Note(Note),
-    Todo(Todo),
-    Reminder(Reminder),
     Agenda(Agenda),
 }
 
@@ -107,8 +102,6 @@ impl DayItem {
     fn icon(&self) -> &'static str {
         match self.kind {
             EntityKind::Task => icons::TASK,
-            EntityKind::Todo => icons::TODO,
-            EntityKind::Reminder => icons::REMINDER,
             EntityKind::Note => icons::NOTE,
             EntityKind::Agenda => icons::AGENDA,
             _ => icons::TASK,
@@ -385,25 +378,13 @@ impl CalendarView {
                         EntityKind::Task => {
                             let id = eref.id.clone();
                             self.store.get_task(&id)
-                                .map(|t| t.refs.topics.iter().any(|tg| tg == tag))
-                                .unwrap_or(false)
-                        }
-                        EntityKind::Todo => {
-                            let id = eref.id.clone();
-                            self.store.get_todo(&id)
-                                .map(|t| t.refs.topics.iter().any(|tg| tg == tag))
-                                .unwrap_or(false)
-                        }
-                        EntityKind::Reminder => {
-                            let id = eref.id.clone();
-                            self.store.get_reminder(&id)
-                                .map(|r| r.refs.topics.iter().any(|tg| tg == tag))
+                                .map(|t| t.refs.tags.iter().any(|tg| tg == tag))
                                 .unwrap_or(false)
                         }
                         EntityKind::Note => {
                             let id = eref.id.clone();
                             self.store.get_note(&id)
-                                .map(|n| n.refs.topics.iter().any(|tg| tg == tag))
+                                .map(|n| n.refs.tags.iter().any(|tg| tg == tag))
                                 .unwrap_or(false)
                         }
                         _ => false,
@@ -430,34 +411,6 @@ impl CalendarView {
                         private: t.private,
                         done: t.status == TaskStatus::Done,
                         status: Some(t.status),
-                    });
-                }
-            }
-            EntityKind::Todo => {
-                let id = eref.id.clone();
-                if let Ok(td) = self.store.get_todo(&id) {
-                    return Some(DayItem {
-                        id: td.id.clone(),
-                        kind: EntityKind::Todo,
-                        title: td.title.clone(),
-                        time: td.due_time.clone(),
-                        private: false,
-                        done: td.done,
-                        status: None,
-                    });
-                }
-            }
-            EntityKind::Reminder => {
-                let id = eref.id.clone();
-                if let Ok(r) = self.store.get_reminder(&id) {
-                    return Some(DayItem {
-                        id: r.id.clone(),
-                        kind: EntityKind::Reminder,
-                        title: r.title.clone(),
-                        time: Some(r.remind_at.format("%H:%M").to_string()),
-                        private: false,
-                        done: r.dismissed,
-                        status: None,
                     });
                 }
             }
@@ -515,8 +468,6 @@ impl CalendarView {
         let entity = match item.kind {
             EntityKind::Task => self.store.get_task(&item.id).ok().map(LoadedEntity::Task),
             EntityKind::Note => self.store.get_note(&item.id).ok().map(LoadedEntity::Note),
-            EntityKind::Todo => self.store.get_todo(&item.id).ok().map(LoadedEntity::Todo),
-            EntityKind::Reminder => self.store.get_reminder(&item.id).ok().map(LoadedEntity::Reminder),
             EntityKind::Agenda => self.store.get_agenda(&item.id).ok().map(LoadedEntity::Agenda),
             _ => None,
         };
@@ -527,7 +478,7 @@ impl CalendarView {
     fn detail_fields(&self) -> Vec<FieldRow> {
         match &self.detail_entity {
             Some(LoadedEntity::Task(t)) => {
-                let tags = t.refs.topics.iter()
+                let tags = t.refs.tags.iter()
                     .map(|s| format!("#{}", s))
                     .collect::<Vec<_>>()
                     .join(" ");
@@ -552,7 +503,7 @@ impl CalendarView {
                 rows
             }
             Some(LoadedEntity::Note(n)) => {
-                let tags = n.refs.topics.iter()
+                let tags = n.refs.tags.iter()
                     .map(|s| format!("#{}", s))
                     .collect::<Vec<_>>()
                     .join(" ");
@@ -574,26 +525,6 @@ impl CalendarView {
                 }
                 rows
             }
-            Some(LoadedEntity::Todo(td)) => {
-                let tags = td.refs.topics.iter()
-                    .map(|s| format!("#{}", s))
-                    .collect::<Vec<_>>()
-                    .join(" ");
-                let done_val = if td.done { "✓ done" } else { "○ open" }.to_string();
-                vec![
-                    FieldRow { field: DetailField::Title,    label: "Title",    value: td.title.clone(),                   kind: FieldKind::Text     },
-                    FieldRow { field: DetailField::Done,     label: "Done",     value: done_val,                            kind: FieldKind::Toggle   },
-                    FieldRow { field: DetailField::Due,      label: "Due",      value: td.due_date.as_ref().map(format_date).unwrap_or_default(), kind: FieldKind::DatePick },
-                    FieldRow { field: DetailField::Tags,     label: "Tags",     value: tags,                               kind: FieldKind::Text     },
-                ]
-            }
-            Some(LoadedEntity::Reminder(r)) => {
-                vec![
-                    FieldRow { field: DetailField::Title,    label: "Title",    value: r.title.clone(),                    kind: FieldKind::Text     },
-                    FieldRow { field: DetailField::RemindAt, label: "Remind",   value: r.remind_at.format("%Y-%m-%d %H:%M").to_string(), kind: FieldKind::ReadOnly },
-                    FieldRow { field: DetailField::Created,  label: "Created",  value: format_utc_date(&r.created_at),     kind: FieldKind::ReadOnly },
-                ]
-            }
             Some(LoadedEntity::Agenda(a)) => {
                 vec![
                     FieldRow { field: DetailField::Title,  label: "Title",  value: a.title.clone(),           kind: FieldKind::Text     },
@@ -609,8 +540,6 @@ impl CalendarView {
         match &self.detail_entity {
             Some(LoadedEntity::Task(t)) => Some(&t.id),
             Some(LoadedEntity::Note(n)) => Some(&n.id),
-            Some(LoadedEntity::Todo(td)) => Some(&td.id),
-            Some(LoadedEntity::Reminder(r)) => Some(&r.id),
             Some(LoadedEntity::Agenda(a)) => Some(&a.id),
             None => None,
         }
@@ -655,7 +584,7 @@ impl CalendarView {
                         Some(self.store.save_task(t))
                     }
                     DetailField::Tags => {
-                        t.refs.topics = val.split_whitespace()
+                        t.refs.tags = val.split_whitespace()
                             .map(|s| s.trim_start_matches('#').to_lowercase())
                             .filter(|s| !s.is_empty())
                             .collect();
@@ -673,7 +602,7 @@ impl CalendarView {
                         Some(self.store.save_note(n))
                     }
                     DetailField::Tags => {
-                        n.refs.topics = val.split_whitespace()
+                        n.refs.tags = val.split_whitespace()
                             .map(|s| s.trim_start_matches('#').to_lowercase())
                             .filter(|s| !s.is_empty())
                             .collect();
@@ -681,30 +610,6 @@ impl CalendarView {
                         Some(self.store.save_note(n))
                     }
                     _ => None,
-                }
-            }
-            Some(LoadedEntity::Todo(td)) => {
-                match field {
-                    DetailField::Title => {
-                        td.title = val.clone();
-                        Some(self.store.save_todo(td))
-                    }
-                    DetailField::Tags => {
-                        td.refs.topics = val.split_whitespace()
-                            .map(|s| s.trim_start_matches('#').to_lowercase())
-                            .filter(|s| !s.is_empty())
-                            .collect();
-                        Some(self.store.save_todo(td))
-                    }
-                    _ => None,
-                }
-            }
-            Some(LoadedEntity::Reminder(r)) => {
-                if field == DetailField::Title {
-                    r.title = val.clone();
-                    Some(self.store.save_reminder(r))
-                } else {
-                    None
                 }
             }
             Some(LoadedEntity::Agenda(a)) => {
@@ -759,21 +664,6 @@ impl CalendarView {
         self.load_detail_item();
         self.load_day_items();
         Some(AppMessage::Reload)
-    }
-
-    /// Toggle the Done field on a Todo.
-    fn toggle_todo_done(&mut self) -> Option<AppMessage> {
-        if let Some(LoadedEntity::Todo(td)) = &mut self.detail_entity {
-            td.done = !td.done;
-            td.done_at = if td.done { Some(chrono::Utc::now()) } else { None };
-            if let Err(e) = self.store.save_todo(td) {
-                return Some(AppMessage::Error(format!("Save failed: {}", e)));
-            }
-            self.load_detail_item();
-            self.load_day_items();
-            return Some(AppMessage::Reload);
-        }
-        None
     }
 
     // ── Drawing ───────────────────────────────────────────────────
@@ -1384,7 +1274,7 @@ impl CalendarView {
                             }
                         }
                         FieldKind::Toggle => {
-                            return self.toggle_todo_done();
+                            // No toggle fields remain after Todo removal
                         }
                         FieldKind::ReadOnly => {}
                     }
@@ -1469,9 +1359,8 @@ impl CalendarView {
                         let item_kind = item.kind.clone();
                         match item_kind {
                             EntityKind::Task     => { let _ = self.store.delete_task(&item_id); }
-                            EntityKind::Todo     => { let _ = self.store.delete_todo(&item_id); }
                             EntityKind::Note     => { let _ = self.store.delete_note(&item_id); }
-                            EntityKind::Reminder => { let _ = self.store.delete_reminder(&item_id); }
+                            EntityKind::Agenda   => { let _ = self.store.delete_agenda(&item_id); }
                             _ => {}
                         }
                         self.load_day_items();

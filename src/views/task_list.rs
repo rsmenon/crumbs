@@ -177,7 +177,7 @@ impl TaskListView {
     fn reload(&mut self) {
         if let Ok(mut tasks) = self.store.list_tasks() {
             if let Some(ref tag) = self.tag_filter {
-                tasks.retain(|t| t.refs.topics.iter().any(|tg| tg == tag));
+                tasks.retain(|t| t.refs.tags.iter().any(|tg| tg == tag));
             }
             self.all = tasks;
         }
@@ -203,7 +203,7 @@ impl TaskListView {
                     let status_match = t.status.label().to_lowercase().contains(&q);
                     let tag_match = t
                         .refs
-                        .topics
+                        .tags
                         .iter()
                         .any(|tg| tg.to_lowercase().contains(&q));
                     let person_match = t
@@ -255,8 +255,8 @@ impl TaskListView {
             }
             Column::Tags => {
                 self.visible.sort_by(|a, b| {
-                    let tag_a = a.refs.topics.first().map(|t| t.to_lowercase());
-                    let tag_b = b.refs.topics.first().map(|t| t.to_lowercase());
+                    let tag_a = a.refs.tags.first().map(|t| t.to_lowercase());
+                    let tag_b = b.refs.tags.first().map(|t| t.to_lowercase());
                     let ord = match (&tag_a, &tag_b) {
                         (Some(ta), Some(tb)) => ta.cmp(tb),
                         (Some(_), None) => std::cmp::Ordering::Less,
@@ -350,7 +350,7 @@ impl TaskListView {
                 task.title = clean;
                 task.private = is_private;
                 task.refs.people = extract_mentions(&task.title);
-                task.refs.topics = extract_topics(&task.title);
+                task.refs.tags = extract_topics(&task.title);
             }
             Column::Tags => {
                 // Parse as space-separated tags (with or without #)
@@ -359,7 +359,7 @@ impl TaskListView {
                     .map(|s| s.trim_start_matches('#').to_lowercase())
                     .filter(|s| !s.is_empty())
                     .collect();
-                task.refs.topics = tags;
+                task.refs.tags = tags;
             }
             Column::Created => {
                 // Created is read-only — no-op
@@ -421,7 +421,7 @@ impl TaskListView {
             Column::Title => task.title.clone(),
             Column::Tags => {
                 task.refs
-                    .topics
+                    .tags
                     .iter()
                     .map(|t| format!("#{}", t))
                     .collect::<Vec<_>>()
@@ -830,7 +830,7 @@ impl TaskListView {
                 task.title = clean_title;
                 task.private = is_private;
                 task.refs.people = extract_mentions(&task.title);
-                task.refs.topics = extract_topics(&task.title);
+                task.refs.tags = extract_topics(&task.title);
                 let today = Local::now().date_naive();
                 if let Some((d, t, cleaned)) = parse_datetime(&task.title, today) {
                     let final_title = if cleaned.trim().is_empty() {
@@ -854,22 +854,17 @@ impl TaskListView {
                             pinned: false,
                             archived: false,
                             metadata: Default::default(),
-                            tags: Vec::new(),
                         };
                         let _ = self.store.save_person(&person);
                     }
                 }
-                for slug in &task.refs.topics {
-                    if self.store.get_topic(slug).is_err() {
-                        let topic = crate::domain::Topic {
+                for slug in &task.refs.tags {
+                    if self.store.get_tag(slug).is_err() {
+                        let tag = crate::domain::Tag {
                             slug: slug.clone(),
-                            display_name: String::new(),
-                            aliases: Vec::new(),
                             created_at: now_utc,
-                            description: String::new(),
-                            metadata: Default::default(),
                         };
-                        let _ = self.store.save_topic(&topic);
+                        let _ = self.store.save_tag(&tag);
                     }
                 }
                 self.cancel_input();
@@ -1265,7 +1260,7 @@ impl TaskListView {
             // ── Tags column ───────────────────────────────────
             let tags_text = task
                 .refs
-                .topics
+                .tags
                 .iter()
                 .map(|t| format!("#{}", t))
                 .collect::<Vec<_>>()

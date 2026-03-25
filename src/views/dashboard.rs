@@ -1,7 +1,7 @@
 use std::collections::HashSet;
 use std::sync::Arc;
 
-use chrono::{Local, NaiveDate, Utc};
+use chrono::{Local, NaiveDate};
 use crossterm::event::{Event, KeyCode, KeyEvent};
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
 use ratatui::style::Modifier;
@@ -32,8 +32,6 @@ impl AgendaItem {
     fn icon(&self) -> &'static str {
         match self.kind {
             EntityKind::Task => icons::TASK,
-            EntityKind::Todo => icons::TODO,
-            EntityKind::Reminder => icons::REMINDER,
             EntityKind::Note => icons::NOTE,
             EntityKind::Person => icons::MEMORY,
             EntityKind::Agenda => icons::AGENDA,
@@ -118,14 +116,13 @@ impl Dashboard {
         self.pinned.clear();
 
         let today = Local::now().date_naive();
-        let now_utc = Utc::now();
 
         // Tasks
         if let Ok(tasks) = self.store.list_tasks() {
             for t in tasks {
                 // Apply global tag filter
                 if let Some(ref tag) = self.tag_filter {
-                    if !t.refs.topics.iter().any(|tg| tg == tag) {
+                    if !t.refs.tags.iter().any(|tg| tg == tag) {
                         continue;
                     }
                 }
@@ -161,74 +158,11 @@ impl Dashboard {
             }
         }
 
-        // Todos
-        if let Ok(todos) = self.store.list_todos() {
-            for td in todos {
-                if let Some(ref tag) = self.tag_filter {
-                    if !td.refs.topics.iter().any(|tg| tg == tag) {
-                        continue;
-                    }
-                }
-                let overdue = is_date_overdue(&td.due_date, today);
-                let item = AgendaItem {
-                    id: td.id.clone(),
-                    kind: EntityKind::Todo,
-                    title: td.title.clone(),
-                    due_date: td.due_date.clone(),
-                    due_time: td.due_time.clone(),
-                    done: td.done,
-                    private: false,
-                };
-
-                if td.done {
-                    self.recent.push(item);
-                } else if overdue {
-                    self.overdue.push(item);
-                } else if td.due_date.is_some() {
-                    self.upcoming.push(item);
-                } else {
-                    self.recent.push(item);
-                }
-            }
-        }
-
-        // Reminders
-        if let Ok(reminders) = self.store.list_reminders() {
-            for r in reminders {
-                if r.dismissed {
-                    continue;
-                }
-                if let Some(ref tag) = self.tag_filter {
-                    if !r.refs.topics.iter().any(|tg| tg == tag) {
-                        continue;
-                    }
-                }
-                let local_remind: chrono::DateTime<chrono::Local> = r.remind_at.into();
-                let remind_date = local_remind.date_naive();
-                let overdue = r.remind_at < now_utc;
-                let item = AgendaItem {
-                    id: r.id.clone(),
-                    kind: EntityKind::Reminder,
-                    title: r.title.clone(),
-                    due_date: Some(remind_date),
-                    due_time: Some(r.remind_at.format("%H:%M").to_string()),
-                    done: false,
-                    private: false,
-                };
-
-                if overdue {
-                    self.overdue.push(item);
-                } else {
-                    self.upcoming.push(item);
-                }
-            }
-        }
-
         // Pinned notes
         if let Ok(notes) = self.store.list_notes() {
             for n in notes {
                 if let Some(ref tag) = self.tag_filter {
-                    if !n.refs.topics.iter().any(|tg| tg == tag) {
+                    if !n.refs.tags.iter().any(|tg| tg == tag) {
                         continue;
                     }
                 }
@@ -534,9 +468,7 @@ impl Dashboard {
                         let item_kind = entry.item.kind.clone();
                         match item_kind {
                             EntityKind::Task => { let _ = self.store.delete_task(&item_id); }
-                            EntityKind::Todo => { let _ = self.store.delete_todo(&item_id); }
                             EntityKind::Note => { let _ = self.store.delete_note(&item_id); }
-                            EntityKind::Reminder => { let _ = self.store.delete_reminder(&item_id); }
                             _ => return None,
                         }
                         self.reload();

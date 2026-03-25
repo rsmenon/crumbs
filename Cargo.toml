@@ -1,6 +1,6 @@
 [package]
 name = "crumb"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2024"
 description = "Terminal-based personal productivity system"
 
@@ -40,6 +40,9 @@ async-trait = "0.1"
 
 # Fuzzy search
 nucleo-matcher = "0.3"
+
+# SQLite
+rusqlite = { version = "0.34", features = ["bundled"] }
 
 [dev-dependencies]
 tempfile = "3"
