@@ -114,7 +114,7 @@ pub mod icons {
     pub const AGENDA: &str = "\u{f03ea}";    // 󰏪  nf-md-pencil
     pub const TAG: &str = "\u{f02c}";       // tag icon
     pub const ARCHIVE: &str = "⊟";           // archived indicator
-    pub const PIN: &str = "※";               // reference mark
+    pub const PIN: &str = "\u{f0403}";        // 󰐃  nf-md-pin
     pub const BODY: &str = "≡";             // three horizontal bars
 }
 

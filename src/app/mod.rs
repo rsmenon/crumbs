@@ -220,8 +220,7 @@ impl App {
                 // Resize embedded nvim to match the new content area.
                 if self.show_editor {
                     if let Some(ref editor) = self.editor {
-                        let nvim_h = content_h.saturating_sub(2).max(1);
-                        editor.resize(*w, nvim_h);
+                        editor.resize(*w, content_h);
                     }
                 }
                 None

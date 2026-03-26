@@ -5,7 +5,7 @@ use crossterm::event::{Event, KeyCode, KeyEvent};
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, Borders, Paragraph};
+use ratatui::widgets::{Block, Borders, Clear, Paragraph};
 use ratatui::Frame;
 
 use crate::app::message::AppMessage;
@@ -27,7 +27,7 @@ enum PeopleFocus {
 impl PeopleFocus {
     fn next(self) -> Self {
         match self {
-            Self::Sidebar => Self::Metadata,
+            Self::Sidebar => Self::Agendas,
             Self::Metadata => Self::Agendas,
             Self::Agendas => Self::Timeline,
             Self::Timeline => Self::Sidebar,
@@ -38,10 +38,19 @@ impl PeopleFocus {
         match self {
             Self::Sidebar => Self::Timeline,
             Self::Metadata => Self::Sidebar,
-            Self::Agendas => Self::Metadata,
+            Self::Agendas => Self::Sidebar,
             Self::Timeline => Self::Agendas,
         }
     }
+}
+
+// ── MetaPopupFocus ───────────────────────────────────────────────
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum MetaPopupFocus {
+    Rows,
+    AddButton,
+    EditButton,
 }
 
 // ── AgendaColumn / SortDirection ────────────────────────────────
@@ -118,11 +127,22 @@ pub struct PeopleView {
 
     // Metadata section
     editing_metadata: bool,
+    show_meta_popup: bool,
+    meta_popup_focus: MetaPopupFocus,
+    meta_editing_mode: bool,
     meta_input: String,
     meta_cursor: usize,
     meta_field: MetaField,
     /// Ordered list of metadata keys for the selected person (for stable cursor).
     meta_keys: Vec<MetaField>,
+
+    // Two-field editing in the popup (key + value separately)
+    meta_edit_in_key: bool,
+    meta_key_input: String,
+    // Add mode: new row at bottom of popup
+    meta_add_mode: bool,
+    meta_add_in_key: bool,
+    meta_add_key: String,
 
     // 1:1 Agendas
     agendas: Vec<Agenda>,
@@ -161,10 +181,18 @@ impl PeopleView {
             left_cursor: 0,
             focus: PeopleFocus::Sidebar,
             editing_metadata: false,
+            show_meta_popup: false,
+            meta_popup_focus: MetaPopupFocus::Rows,
+            meta_editing_mode: false,
             meta_input: String::new(),
             meta_cursor: 0,
             meta_field: MetaField(String::new()),
             meta_keys: Vec::new(),
+            meta_edit_in_key: false,
+            meta_key_input: String::new(),
+            meta_add_mode: false,
+            meta_add_in_key: true,
+            meta_add_key: String::new(),
             agendas: Vec::new(),
             agenda_cursor: 0,
             agenda_editing: false,
@@ -230,12 +258,15 @@ impl PeopleView {
             self.left_cursor = idx;
             self.reload_right_side();
         }
-        // Switch to metadata pane and prompt for name with pre-filled key
-        self.focus = PeopleFocus::Metadata;
-        self.meta_field = MetaField(String::new());
-        self.meta_cursor = self.meta_keys.len(); // past existing keys (new field)
+        // Open metadata popup and prompt for name with pre-filled key
+        self.show_meta_popup = true;
+        self.meta_popup_focus = MetaPopupFocus::AddButton;
+        self.meta_editing_mode = false;
+        self.meta_add_mode = true;
+        self.meta_add_in_key = false; // start in value field since key is pre-filled
+        self.meta_add_key = "name".to_string();
+        self.meta_input = String::new();
         self.editing_metadata = true;
-        self.meta_input = "name: ".to_string();
     }
 
     fn reload_right_side(&mut self) {
@@ -392,45 +423,43 @@ impl PeopleView {
     // ── Metadata editing ─────────────────────────────────────────
 
     fn start_meta_edit(&mut self) {
-        let Some(person) = self.people.get(self.left_cursor) else {
-            return;
-        };
+        let Some(person) = self.people.get(self.left_cursor) else { return; };
+        let MetaField(key) = &self.meta_field;
+        let value = person.metadata.get(key).cloned().unwrap_or_default();
 
-        let value = match &self.meta_field {
-            MetaField(key) => person.metadata.get(key).cloned().unwrap_or_default(),
-        };
-
-        self.editing_metadata = true;
+        self.meta_key_input = key.clone();
         self.meta_input = value;
+        self.meta_edit_in_key = false; // default: edit value, Tab to switch to key
+        self.editing_metadata = true;
     }
 
     fn save_meta_edit(&mut self) {
         self.editing_metadata = false;
         let Some(person) = self.people.get_mut(self.left_cursor) else {
+            self.meta_input.clear();
+            self.meta_key_input.clear();
             return;
         };
 
-        let key_name;
-        let val_str;
-        match &self.meta_field {
-            MetaField(key) => {
-                let val = self.meta_input.trim().to_string();
-                key_name = key.clone();
-                val_str = val.clone();
-                if val.is_empty() {
-                    person.metadata.remove(key);
-                } else {
-                    person.metadata.insert(key.clone(), val);
-                }
-            }
+        let old_key = match &self.meta_field { MetaField(k) => k.clone() };
+        let new_key = self.meta_key_input.trim().to_string();
+        let val = self.meta_input.trim().to_string();
+
+        // Remove old key regardless of rename
+        person.metadata.remove(&old_key);
+
+        // Re-insert only if both key and value are non-empty
+        if !new_key.is_empty() && !val.is_empty() {
+            person.metadata.insert(new_key.clone(), val.clone());
         }
 
         let _ = self.store.save_person(person);
-        // If editing name on an auto-generated slug, rename to match
-        if key_name == "name" && !val_str.is_empty() {
-            self.maybe_rename_person_slug(&val_str);
+        if new_key == "name" && !val.is_empty() {
+            self.maybe_rename_person_slug(&val);
         }
+
         self.meta_input.clear();
+        self.meta_key_input.clear();
         self.reload_meta_keys();
     }
 
@@ -489,6 +518,9 @@ impl PeopleView {
 
     fn cancel_meta_edit(&mut self) {
         self.editing_metadata = false;
+        self.meta_add_mode = false;
+        self.meta_add_key.clear();
+        self.meta_key_input.clear();
         self.meta_input.clear();
     }
 
@@ -508,43 +540,39 @@ impl PeopleView {
     }
 
     fn add_meta_field(&mut self) {
-        // Start editing a new custom field. We prompt for "key: value" format.
-        // Set cursor past end so no existing field is highlighted as "selected".
-        self.meta_field = MetaField(String::new());
-        self.meta_cursor = self.meta_keys.len(); // past all existing keys
-        self.editing_metadata = true;
+        self.meta_add_mode = true;
+        self.meta_add_in_key = true;
+        self.meta_add_key = String::new();
         self.meta_input = String::new();
+        self.editing_metadata = true;
     }
 
     fn save_new_meta_field(&mut self) {
-        // For new fields, expect "key: value" format in meta_input
+        self.meta_add_mode = false;
         self.editing_metadata = false;
-        let input = self.meta_input.trim().to_string();
-        if input.is_empty() {
-            self.meta_input.clear();
+
+        let key = self.meta_add_key.trim().to_string();
+        let val = self.meta_input.trim().to_string();
+
+        self.meta_add_key.clear();
+        self.meta_input.clear();
+
+        if key.is_empty() {
             self.reload_meta_keys();
             return;
         }
 
         let Some(person) = self.people.get_mut(self.left_cursor) else {
-            self.meta_input.clear();
+            self.reload_meta_keys();
             return;
         };
 
-        if let Some(colon_pos) = input.find(':') {
-            let key = input[..colon_pos].trim().to_string();
-            let val = input[colon_pos + 1..].trim().to_string();
-            if !key.is_empty() && !val.is_empty() {
-                person.metadata.insert(key.clone(), val.clone());
-                let _ = self.store.save_person(person);
-                // If setting name on an auto-generated slug, rename to match
-                if key == "name" {
-                    self.maybe_rename_person_slug(&val);
-                }
-            }
+        person.metadata.insert(key.clone(), val.clone());
+        let _ = self.store.save_person(person);
+        if key == "name" && !val.is_empty() {
+            self.maybe_rename_person_slug(&val);
         }
 
-        self.meta_input.clear();
         self.reload_meta_keys();
     }
 
@@ -665,12 +693,15 @@ impl View for PeopleView {
             return self.handle_confirm_delete_key(*code);
         }
 
-        if self.agenda_editing {
-            return self.handle_agenda_edit_key(*code);
+        if self.show_meta_popup {
+            if self.editing_metadata {
+                return self.handle_meta_edit_key(*code);
+            }
+            return self.handle_meta_popup_key(*code);
         }
 
-        if self.editing_metadata {
-            return self.handle_meta_edit_key(*code);
+        if self.agenda_editing {
+            return self.handle_agenda_edit_key(*code);
         }
 
         self.handle_normal_key(*code)
@@ -742,10 +773,14 @@ impl View for PeopleView {
         if let Some(confirm_area) = confirm_area {
             self.draw_confirm_bar(frame, confirm_area, theme);
         }
+
+        if self.show_meta_popup {
+            self.draw_meta_popup(frame, main_area, theme);
+        }
     }
 
     fn captures_input(&self) -> bool {
-        self.editing_metadata || self.agenda_editing || self.confirm_delete.is_some()
+        self.show_meta_popup || self.editing_metadata || self.agenda_editing || self.confirm_delete.is_some()
     }
 }
 
@@ -994,6 +1029,16 @@ impl PeopleView {
             }
             KeyCode::Enter => {
                 match self.focus {
+                    PeopleFocus::Sidebar => {
+                        self.show_meta_popup = true;
+                        self.meta_popup_focus = if self.meta_keys.is_empty() {
+                            MetaPopupFocus::AddButton
+                        } else {
+                            MetaPopupFocus::Rows
+                        };
+                        self.meta_editing_mode = false;
+                        None
+                    }
                     PeopleFocus::Metadata => {
                         self.start_meta_edit();
                         None
@@ -1041,7 +1086,6 @@ impl PeopleView {
                         }
                         None
                     }
-                    _ => None,
                 }
             }
             KeyCode::Char('a') => {
@@ -1081,25 +1125,140 @@ impl PeopleView {
     fn handle_meta_edit_key(&mut self, code: KeyCode) -> Option<AppMessage> {
         match code {
             KeyCode::Enter => {
-                // If adding a new field (Custom with empty key), use special handler
-                let MetaField(ref key) = self.meta_field;
-                if key.is_empty() {
+                if self.meta_add_mode {
+                    if self.meta_add_in_key {
+                        // Move focus from key to value field
+                        self.meta_add_in_key = false;
+                        return None;
+                    }
                     self.save_new_meta_field();
                     return Some(AppMessage::Reload);
                 }
                 self.save_meta_edit();
                 Some(AppMessage::Reload)
             }
+            KeyCode::Tab => {
+                if self.meta_add_mode {
+                    self.meta_add_in_key = !self.meta_add_in_key;
+                } else {
+                    self.meta_edit_in_key = !self.meta_edit_in_key;
+                }
+                None
+            }
             KeyCode::Esc => {
                 self.cancel_meta_edit();
                 None
             }
             KeyCode::Backspace => {
-                self.meta_input.pop();
+                if self.meta_add_mode {
+                    if self.meta_add_in_key { self.meta_add_key.pop(); }
+                    else { self.meta_input.pop(); }
+                } else if self.meta_edit_in_key {
+                    self.meta_key_input.pop();
+                } else {
+                    self.meta_input.pop();
+                }
                 None
             }
             KeyCode::Char(c) => {
-                self.meta_input.push(c);
+                if self.meta_add_mode {
+                    if self.meta_add_in_key { self.meta_add_key.push(c); }
+                    else { self.meta_input.push(c); }
+                } else if self.meta_edit_in_key {
+                    self.meta_key_input.push(c);
+                } else {
+                    self.meta_input.push(c);
+                }
+                None
+            }
+            _ => None,
+        }
+    }
+
+    fn handle_meta_popup_key(&mut self, code: KeyCode) -> Option<AppMessage> {
+        match code {
+            KeyCode::Esc => {
+                if self.meta_editing_mode {
+                    self.meta_editing_mode = false;
+                    self.meta_popup_focus = MetaPopupFocus::EditButton;
+                } else {
+                    self.show_meta_popup = false;
+                }
+                None
+            }
+            KeyCode::Tab => {
+                self.meta_popup_focus = match self.meta_popup_focus {
+                    MetaPopupFocus::Rows => MetaPopupFocus::AddButton,
+                    MetaPopupFocus::AddButton => MetaPopupFocus::EditButton,
+                    MetaPopupFocus::EditButton => MetaPopupFocus::Rows,
+                };
+                None
+            }
+            KeyCode::BackTab => {
+                self.meta_popup_focus = match self.meta_popup_focus {
+                    MetaPopupFocus::Rows => MetaPopupFocus::EditButton,
+                    MetaPopupFocus::AddButton => MetaPopupFocus::Rows,
+                    MetaPopupFocus::EditButton => MetaPopupFocus::AddButton,
+                };
+                None
+            }
+            KeyCode::Char('j') | KeyCode::Down => {
+                if self.meta_popup_focus == MetaPopupFocus::Rows || self.meta_editing_mode {
+                    if !self.meta_keys.is_empty() && self.meta_cursor + 1 < self.meta_keys.len() {
+                        self.meta_cursor += 1;
+                        self.meta_field = self.meta_keys[self.meta_cursor].clone();
+                    }
+                }
+                None
+            }
+            KeyCode::Char('k') | KeyCode::Up => {
+                if self.meta_popup_focus == MetaPopupFocus::Rows || self.meta_editing_mode {
+                    if self.meta_cursor > 0 {
+                        self.meta_cursor -= 1;
+                        self.meta_field = self.meta_keys[self.meta_cursor].clone();
+                    }
+                }
+                None
+            }
+            KeyCode::Enter => {
+                match self.meta_popup_focus {
+                    MetaPopupFocus::AddButton => {
+                        self.add_meta_field();
+                        None
+                    }
+                    MetaPopupFocus::EditButton => {
+                        if !self.meta_keys.is_empty() {
+                            self.meta_editing_mode = true;
+                            self.meta_popup_focus = MetaPopupFocus::Rows;
+                            if self.meta_cursor >= self.meta_keys.len() {
+                                self.meta_cursor = 0;
+                            }
+                            self.meta_field = self.meta_keys[self.meta_cursor].clone();
+                        } else {
+                            self.add_meta_field();
+                        }
+                        None
+                    }
+                    MetaPopupFocus::Rows => {
+                        if self.meta_editing_mode {
+                            if self.meta_keys.is_empty() {
+                                self.add_meta_field();
+                            } else {
+                                self.start_meta_edit();
+                            }
+                        }
+                        None
+                    }
+                }
+            }
+            KeyCode::Char('d') => {
+                if self.meta_editing_mode {
+                    if let Some(MetaField(key)) = self.meta_keys.get(self.meta_cursor) {
+                        if !key.is_empty() {
+                            self.confirm_delete = Some((PeopleFocus::Metadata, key.clone()));
+                        }
+                    }
+                }
                 None
             }
             _ => None,
@@ -1253,25 +1412,10 @@ impl PeopleView {
 
 
     fn draw_right(&self, frame: &mut Frame, area: Rect, theme: &Theme) {
-        // Adapt metadata height to content: +2 for border top/bottom
-        let meta_field_count = self.meta_keys.len().max(1);
-        let meta_h = ((meta_field_count + 2) as u16) // fields + 2 for borders
-            .max(4)
-            .min(area.height / 3)
-            .max(area.height / 6);
-
-        let v_chunks = Layout::default()
-            .direction(Direction::Vertical)
-            .constraints([
-                Constraint::Length(meta_h),
-                Constraint::Min(1),
-            ])
-            .split(area);
-
-        self.draw_metadata(frame, v_chunks[0], theme);
-        self.draw_bottom(frame, v_chunks[1], theme);
+        self.draw_bottom(frame, area, theme);
     }
 
+    #[allow(dead_code)]
     fn draw_metadata(&self, frame: &mut Frame, area: Rect, theme: &Theme) {
         let focused = self.focus == PeopleFocus::Metadata;
         let (title_style, border_style) = self.section_styles(focused, theme);
@@ -1349,6 +1493,170 @@ impl PeopleView {
 
         let para = Paragraph::new(lines);
         frame.render_widget(para, inner);
+    }
+
+    fn draw_meta_popup(&self, frame: &mut Frame, area: Rect, theme: &Theme) {
+        let Some(person) = self.people.get(self.left_cursor) else { return; };
+
+        let num_fields = self.meta_keys.len();
+        let extra_rows = if self.meta_add_mode { 1u16 } else { 0u16 };
+        let content_rows = ((num_fields as u16 + extra_rows).max(1)).min(area.height.saturating_sub(6));
+        // border(2) + title(1) + fields + gap(1) + buttons(1) = fields + 5
+        let popup_h = (content_rows + 5).max(7).min(area.height.saturating_sub(2));
+        let popup_w = 52u16.min(area.width.saturating_sub(4)).max(32);
+
+        let popup_rect = Rect {
+            x: area.x + area.width.saturating_sub(popup_w) / 2,
+            y: area.y + area.height.saturating_sub(popup_h) / 2,
+            width: popup_w,
+            height: popup_h,
+        };
+
+        frame.render_widget(Clear, popup_rect);
+
+        let block = Block::default()
+            .borders(Borders::ALL)
+            .border_style(theme.border)
+            .title(Span::styled(format!(" @{} ", person.slug), theme.person));
+
+        let inner = block.inner(popup_rect);
+        frame.render_widget(block, popup_rect);
+
+        // Key and value column widths
+        let max_key_w: usize = 14;
+        let max_val_w = (inner.width as usize).saturating_sub(max_key_w + 4);
+
+        let mut lines: Vec<Line> = Vec::new();
+
+        if num_fields == 0 && !self.meta_add_mode {
+            lines.push(Line::from(Span::styled("  No metadata yet", theme.dim)));
+        } else {
+            for (i, MetaField(key)) in self.meta_keys.iter().enumerate() {
+                let value = person.metadata.get(key).cloned().unwrap_or_default();
+
+                let is_cursor = (self.meta_popup_focus == MetaPopupFocus::Rows || self.meta_editing_mode)
+                    && i == self.meta_cursor;
+                let is_editing = self.editing_metadata && is_cursor;
+
+                // Key display: show text cursor when actively editing the key field
+                let key_display = if is_editing {
+                    let s = format!("{}{}", self.meta_key_input,
+                        if self.meta_edit_in_key { "|" } else { "" });
+                    format!("{:<width$}", truncate(&s, max_key_w), width = max_key_w)
+                } else {
+                    format!("{:<width$}", truncate(key, max_key_w), width = max_key_w)
+                };
+
+                // Value display: show text cursor when actively editing the value field
+                let val_display = if is_editing {
+                    let s = format!("{}{}", self.meta_input,
+                        if !self.meta_edit_in_key { "|" } else { "" });
+                    truncate(&s, max_val_w)
+                } else if value.is_empty() {
+                    "\u{2014}".to_string()
+                } else {
+                    truncate(&value, max_val_w)
+                };
+
+                let key_style = if is_editing && self.meta_edit_in_key {
+                    theme.column_focus
+                } else if is_cursor {
+                    theme.accent
+                } else {
+                    theme.dim
+                };
+                let val_style = if is_editing && !self.meta_edit_in_key {
+                    theme.column_focus
+                } else {
+                    Style::default()
+                };
+
+                let mut line = Line::from(vec![
+                    Span::raw("  "),
+                    Span::styled(key_display, key_style),
+                    Span::raw("  "),
+                    Span::styled(val_display, val_style),
+                ]);
+                if is_cursor && !self.editing_metadata {
+                    line = line.style(theme.row_gray);
+                }
+                lines.push(line);
+            }
+
+            // New-field row (shown when Add mode is active)
+            if self.meta_add_mode {
+                let key_text = format!("{}{}", self.meta_add_key,
+                    if self.meta_add_in_key { "|" } else { "" });
+                let val_text = format!("{}{}", self.meta_input,
+                    if !self.meta_add_in_key { "|" } else { "" });
+
+                let key_str = format!("{:<width$}", truncate(&key_text, max_key_w), width = max_key_w);
+                let val_str = truncate(&val_text, max_val_w);
+
+                let key_style = if self.meta_add_in_key { theme.column_focus } else { theme.dim };
+                let val_style = if !self.meta_add_in_key { theme.column_focus } else { Style::default() };
+
+                let line = Line::from(vec![
+                    Span::raw("  "),
+                    Span::styled(key_str, key_style),
+                    Span::raw("  "),
+                    Span::styled(val_str, val_style),
+                ]).style(theme.row_gray);
+                lines.push(line);
+            }
+        }
+
+        // Render field rows (leave 1 row for the button/hint bar)
+        let fields_h = inner.height.saturating_sub(1);
+        frame.render_widget(
+            Paragraph::new(lines),
+            Rect { y: inner.y, height: fields_h, ..inner },
+        );
+
+        // Bottom bar: keyboard hints in edit mode, buttons otherwise
+        let btn_y = inner.y + inner.height.saturating_sub(1);
+        if self.meta_editing_mode && !self.editing_metadata {
+            // Edit-mode navigation: show available keys
+            let hint = Line::from(vec![
+                Span::raw("  "),
+                Span::styled("⏎", theme.accent),
+                Span::styled(" edit  ", theme.dim),
+                Span::styled("d", theme.accent),
+                Span::styled(" delete  ", theme.dim),
+                Span::styled("Esc", theme.accent),
+                Span::styled(" exit", theme.dim),
+            ]);
+            frame.render_widget(
+                Paragraph::new(hint),
+                Rect { y: btn_y, height: 1, ..inner },
+            );
+        } else {
+            // Normal popup: show Add / Edit buttons
+            let add_focused = self.meta_popup_focus == MetaPopupFocus::AddButton || self.meta_add_mode;
+            let edit_focused = self.meta_popup_focus == MetaPopupFocus::EditButton;
+
+            // Focused button: row_gray background + accent foreground (primary color).
+            // Unfocused button: row_gray background (gray, dim text).
+            let focused_btn = theme.row_gray.patch(theme.accent).add_modifier(Modifier::BOLD);
+            let unfocused_btn = theme.row_gray.patch(Style::default().fg(
+                // Use the dim fg color for the label text
+                theme.dim.fg.unwrap_or(ratatui::style::Color::Reset)
+            ));
+
+            let add_style = if add_focused { focused_btn } else { unfocused_btn };
+            let edit_style = if edit_focused { focused_btn } else { unfocused_btn };
+
+            let btn_line = Line::from(vec![
+                Span::raw("  "),
+                Span::styled(" Add ", add_style),
+                Span::raw("    "),
+                Span::styled(" Edit ", edit_style),
+            ]);
+            frame.render_widget(
+                Paragraph::new(btn_line),
+                Rect { y: btn_y, height: 1, ..inner },
+            );
+        }
     }
 
     fn draw_bottom(&self, frame: &mut Frame, area: Rect, theme: &Theme) {

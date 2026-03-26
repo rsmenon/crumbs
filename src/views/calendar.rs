@@ -82,7 +82,10 @@ enum LoadedEntity {
 const STATUS_OPTIONS: &[&str] = &["Backlog", "Todo", "Doing", "Blocked", "Done"];
 const PRIORITY_OPTIONS: &[Priority] = &Priority::OPTIONS;
 const PRIORITY_LABELS: &[&str] = &["None", "Low", "Medium", "High"];
-const LABEL_W: usize = 8;
+/// Width of the key name column in the detail pane (matches nvim overlay header).
+const KEY_W: usize = 10;
+/// Total prefix width: 2 indent + 2 glyph + 2 gap + KEY_W key column.
+const DETAIL_PREFIX_W: usize = 2 + 2 + 2 + KEY_W;
 
 // ── Day item resolved from EntityRef ─────────────────────────────
 
@@ -839,8 +842,6 @@ impl CalendarView {
             let is_active = focused && i == self.detail_field_cursor;
             let is_editing = is_active && self.detail_mode == DetailMode::EditingText;
 
-            let label = format!("{:>LABEL_W$} : ", row.label);
-
             let value_str: String = if is_editing {
                 let before = &self.detail_input[..self.detail_input_cursor];
                 let after = &self.detail_input[self.detail_input_cursor..];
@@ -851,7 +852,7 @@ impl CalendarView {
                 row.value.clone()
             };
 
-            let label_style = if is_active { theme.subtitle } else { theme.dim };
+            let key_style = if is_active { theme.subtitle } else { theme.dim };
             let value_style = if is_editing {
                 theme.column_focus
             } else if is_private && !is_revealed && row.field == DetailField::Title {
@@ -878,11 +879,15 @@ impl CalendarView {
                 }
             };
 
-            let w = area.width.saturating_sub(LABEL_W as u16 + 3) as usize;
+            let w = area.width.saturating_sub(DETAIL_PREFIX_W as u16) as usize;
             let truncated = truncate(&value_str, w);
 
+            let glyph = detail_field_glyph(row.field);
             let mut line = Line::from(vec![
-                Span::styled(label, label_style),
+                Span::raw("  "),
+                Span::styled(glyph, theme.dim),
+                Span::raw("  "),
+                Span::styled(format!("{:<KEY_W$}", row.label), key_style),
                 Span::styled(truncated, value_style),
             ]);
             if is_active && !is_editing {
@@ -989,6 +994,25 @@ impl CalendarView {
             lines.push(Line::from(Span::styled(format!("  {}", opt), style)));
         }
         frame.render_widget(Paragraph::new(lines), inner);
+    }
+}
+
+// ── Detail pane helpers ───────────────────────────────────────────
+
+/// Nerd Font glyph for each detail field, matching the nvim overlay header icons.
+fn detail_field_glyph(field: DetailField) -> &'static str {
+    match field {
+        DetailField::Title    => "\u{f0219}", // 󰈙  nf-md-file_document
+        DetailField::Status   => "\u{f0132}", // 󰄲  nf-md-checkbox_marked_outline
+        DetailField::Priority => "\u{f04c5}", // 󰓅  nf-md-signal
+        DetailField::Due      => "\u{f00f0}", // 󰃰  nf-md-calendar_clock
+        DetailField::Tags     => "\u{f04f9}", // 󰓹  nf-md-tag_outline
+        DetailField::Created  => "\u{f00f3}", // 󰃳  nf-md-calendar_today
+        DetailField::Modified => "\u{f08a7}", // 󰢧  nf-md-calendar_edit
+        DetailField::People   => "\u{f0004}", // 󰀄  nf-md-account
+        DetailField::Dir      => "\u{f024b}", // 󰉋  nf-md-folder
+        DetailField::Date     => "\u{f00ed}", // 󰃭  nf-md-calendar
+        DetailField::Person   => "\u{f0004}", // 󰀄  nf-md-account
     }
 }
 
