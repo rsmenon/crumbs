@@ -826,4 +826,48 @@ impl Store for SqliteStore {
 
         results
     }
+
+    fn person_frecency_scores(&self) -> std::collections::HashMap<String, f64> {
+        let conn = self.conn.lock().unwrap();
+        let mut scores = std::collections::HashMap::new();
+
+        // Union three sources of timeline items linked to people:
+        //   tasks and notes via entity_refs, agendas via person_slug.
+        // For each item compute 1 / (1 + age_days / 30) and sum per person.
+        let sql = "
+            SELECT person_slug,
+                   SUM(1.0 / (1.0 + (julianday('now') - julianday(item_date)) / 30.0)) AS score
+            FROM (
+                SELECT er.target_id AS person_slug, t.updated_at AS item_date
+                FROM entity_refs er
+                JOIN tasks t ON er.source_kind = 'task' AND er.source_id = t.id
+                WHERE er.target_kind = 'person'
+
+                UNION ALL
+
+                SELECT er.target_id AS person_slug, n.updated_at AS item_date
+                FROM entity_refs er
+                JOIN notes n ON er.source_kind = 'note' AND er.source_id = n.id
+                WHERE er.target_kind = 'person'
+
+                UNION ALL
+
+                SELECT a.person_slug, a.date AS item_date
+                FROM agendas a
+            )
+            GROUP BY person_slug
+        ";
+
+        if let Ok(mut stmt) = conn.prepare(sql) {
+            if let Ok(rows) = stmt.query_map([], |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, f64>(1)?))
+            }) {
+                for row in rows.flatten() {
+                    scores.insert(row.0, row.1);
+                }
+            }
+        }
+
+        scores
+    }
 }

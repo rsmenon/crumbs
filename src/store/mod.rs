@@ -55,4 +55,12 @@ pub trait Store: Send + Sync {
     fn get_memory(&self, slug: &str) -> Vec<EntityRef>;
     fn search(&self, query: &str) -> Vec<EntityRef>;
 
+    /// Frecency scores for all people.
+    ///
+    /// Each timeline item (task, note, agenda) linked to a person contributes
+    /// `1 / (1 + age_days / 30)` to that person's score — full weight today,
+    /// half weight at 30 days, falling off with a 30-day half-life.
+    /// Returns a map of person slug → score (missing slugs score 0).
+    fn person_frecency_scores(&self) -> std::collections::HashMap<String, f64>;
+
 }

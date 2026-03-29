@@ -171,6 +171,10 @@ pub struct PeopleView {
 
     /// Pending delete confirmation: (focus context, display title, closure data).
     confirm_delete: Option<(PeopleFocus, String)>,
+
+    // Slug editing (new person creation prompt)
+    slug_editing: bool,
+    slug_input: String,
 }
 
 impl PeopleView {
@@ -209,6 +213,8 @@ impl PeopleView {
             show_archived: false,
             tag_filter: None,
             confirm_delete: None,
+            slug_editing: false,
+            slug_input: String::new(),
         }
     }
 
@@ -229,8 +235,14 @@ impl PeopleView {
             }
         }
 
-        // Sort people alphabetically by slug
-        self.people.sort_by(|a, b| a.slug.cmp(&b.slug));
+        // Sort people by frecency (descending), fall back to slug for ties
+        let frecency = self.store.person_frecency_scores();
+        self.people.sort_by(|a, b| {
+            let sa = frecency.get(&a.slug).copied().unwrap_or(0.0);
+            let sb = frecency.get(&b.slug).copied().unwrap_or(0.0);
+            sb.partial_cmp(&sa).unwrap_or(std::cmp::Ordering::Equal)
+                .then_with(|| a.slug.cmp(&b.slug))
+        });
 
         // Clamp cursor
         if !self.people.is_empty() && self.left_cursor >= self.people.len() {
@@ -241,7 +253,31 @@ impl PeopleView {
     }
 
     fn create_person(&mut self) {
-        let slug = format!("person-{}", &crate::domain::new_id()[..8]);
+        let default_slug = format!("person-{}", &crate::domain::new_id()[..8]);
+        self.slug_editing = true;
+        self.slug_input = default_slug;
+    }
+
+    fn confirm_slug_and_create(&mut self) {
+        self.slug_editing = false;
+
+        // Normalize: lowercase, non-alphanumeric → hyphen, trim leading/trailing hyphens
+        let raw = self.slug_input.trim().to_string();
+        let normalized: String = raw
+            .to_lowercase()
+            .chars()
+            .map(|c| if c.is_alphanumeric() || c == '-' { c } else { '-' })
+            .collect::<String>()
+            .trim_matches('-')
+            .to_string();
+        let slug = if normalized.is_empty() {
+            format!("person-{}", &crate::domain::new_id()[..8])
+        } else {
+            normalized
+        };
+
+        self.slug_input.clear();
+
         let person = Person {
             slug: slug.clone(),
             created_at: chrono::Utc::now(),
@@ -693,6 +729,10 @@ impl View for PeopleView {
             return self.handle_confirm_delete_key(*code);
         }
 
+        if self.slug_editing {
+            return self.handle_slug_edit_key(*code);
+        }
+
         if self.show_meta_popup {
             if self.editing_metadata {
                 return self.handle_meta_edit_key(*code);
@@ -777,10 +817,14 @@ impl View for PeopleView {
         if self.show_meta_popup {
             self.draw_meta_popup(frame, main_area, theme);
         }
+
+        if self.slug_editing {
+            self.draw_slug_edit_popup(frame, main_area, theme);
+        }
     }
 
     fn captures_input(&self) -> bool {
-        self.show_meta_popup || self.editing_metadata || self.agenda_editing || self.confirm_delete.is_some()
+        self.slug_editing || self.show_meta_popup || self.editing_metadata || self.agenda_editing || self.confirm_delete.is_some()
     }
 }
 
@@ -989,7 +1033,7 @@ impl PeopleView {
                 match self.focus {
                     PeopleFocus::Sidebar => {
                         self.create_person();
-                        Some(AppMessage::Reload)
+                        None
                     }
                     PeopleFocus::Metadata => {
                         self.add_meta_field();
@@ -1080,6 +1124,12 @@ impl PeopleView {
                                 }
                                 EntityKind::Note => {
                                     return Some(AppMessage::OpenNoteEditor(item_id));
+                                }
+                                EntityKind::Agenda => {
+                                    return Some(AppMessage::OpenInlineEditor {
+                                        kind: EntityKind::Agenda,
+                                        id: item_id,
+                                    });
                                 }
                                 _ => {}
                             }
@@ -1173,6 +1223,66 @@ impl PeopleView {
             }
             _ => None,
         }
+    }
+
+    fn handle_slug_edit_key(&mut self, code: KeyCode) -> Option<AppMessage> {
+        match code {
+            KeyCode::Enter => {
+                self.confirm_slug_and_create();
+                Some(AppMessage::Reload)
+            }
+            KeyCode::Esc => {
+                self.slug_editing = false;
+                self.slug_input.clear();
+                None
+            }
+            KeyCode::Backspace => {
+                self.slug_input.pop();
+                None
+            }
+            KeyCode::Char(c) => {
+                self.slug_input.push(c);
+                None
+            }
+            _ => None,
+        }
+    }
+
+    fn draw_slug_edit_popup(&self, frame: &mut Frame, area: Rect, theme: &Theme) {
+        let popup_w = 48u16.min(area.width.saturating_sub(4)).max(32);
+        let popup_h = 5u16;
+
+        let popup_rect = Rect {
+            x: area.x + area.width.saturating_sub(popup_w) / 2,
+            y: area.y + area.height.saturating_sub(popup_h) / 2,
+            width: popup_w,
+            height: popup_h,
+        };
+
+        frame.render_widget(Clear, popup_rect);
+
+        let block = Block::default()
+            .borders(Borders::ALL)
+            .border_style(theme.border)
+            .title(Span::styled(" New Person ", theme.title));
+
+        let inner = block.inner(popup_rect);
+        frame.render_widget(block, popup_rect);
+
+        let max_w = inner.width.saturating_sub(6) as usize;
+        let input_display = format!("@{}|", self.slug_input);
+        let input_display = truncate(&input_display, max_w);
+
+        let lines = vec![
+            Line::from(vec![
+                Span::styled("  Slug  ", theme.dim),
+                Span::styled(input_display, theme.person),
+            ]),
+            Line::from(""),
+            Line::from(Span::styled("  Enter to confirm · Esc to cancel", theme.dim)),
+        ];
+
+        frame.render_widget(Paragraph::new(lines), inner);
     }
 
     fn handle_meta_popup_key(&mut self, code: KeyCode) -> Option<AppMessage> {

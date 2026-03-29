@@ -869,7 +869,11 @@ impl TaskListView {
                 }
                 self.cancel_input();
                 self.reload();
-                Some(AppMessage::OpenTaskEditor(id))
+                // Select the newly created task
+                if let Some(idx) = self.visible.iter().position(|t| t.id == id) {
+                    self.cursor = idx;
+                }
+                Some(AppMessage::Reload)
             }
             KeyCode::Esc => {
                 self.creating = None;

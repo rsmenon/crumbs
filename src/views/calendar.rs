@@ -62,7 +62,6 @@ enum FieldKind {
     Select,
     DatePick,
     ReadOnly,
-    Toggle,
 }
 
 struct FieldRow {
@@ -873,7 +872,7 @@ impl CalendarView {
                     DetailField::Dir => theme.dim,
                     _ => match row.kind {
                         FieldKind::ReadOnly => theme.dim,
-                        FieldKind::Select | FieldKind::DatePick | FieldKind::Toggle if is_active => theme.accent,
+                        FieldKind::Select | FieldKind::DatePick if is_active => theme.accent,
                         _ => theme.title.remove_modifier(Modifier::BOLD),
                     },
                 }
@@ -1296,9 +1295,6 @@ impl CalendarView {
                                     return Some(AppMessage::OpenDatePicker { date: current, context });
                                 }
                             }
-                        }
-                        FieldKind::Toggle => {
-                            // No toggle fields remain after Todo removal
                         }
                         FieldKind::ReadOnly => {}
                     }
