@@ -175,6 +175,11 @@ pub struct PeopleView {
     // Slug editing (new person creation prompt)
     slug_editing: bool,
     slug_input: String,
+
+    // Rename slug (existing person)
+    rename_editing: bool,
+    rename_input: String,
+    rename_error: Option<String>,
 }
 
 impl PeopleView {
@@ -215,6 +220,9 @@ impl PeopleView {
             confirm_delete: None,
             slug_editing: false,
             slug_input: String::new(),
+            rename_editing: false,
+            rename_input: String::new(),
+            rename_error: None,
         }
     }
 
@@ -505,12 +513,11 @@ impl PeopleView {
         let Some(person) = self.people.get(self.left_cursor) else { return; };
         let old_slug = person.slug.clone();
 
-        // Only rename auto-generated slugs
+        // Only rename auto-generated slugs.
         if !old_slug.starts_with("person-") {
             return;
         }
 
-        // Derive slug from name: lowercase, replace non-alphanumeric with hyphens, trim
         let new_slug: String = name
             .to_lowercase()
             .chars()
@@ -523,32 +530,13 @@ impl PeopleView {
             return;
         }
 
-        // Check if a person with the new slug already exists
-        if let Ok(mut existing) = self.store.get_person(&new_slug) {
-            // Merge: copy metadata and tags from the new person into existing
-            let person = &self.people[self.left_cursor];
-            for (k, v) in &person.metadata {
-                existing.metadata.entry(k.clone()).or_insert_with(|| v.clone());
+        // Attempt atomic rename; silently skip on collision (slug already taken).
+        if self.store.rename_person(&old_slug, &new_slug).is_ok() {
+            self.reload();
+            if let Some(idx) = self.people.iter().position(|p| p.slug == new_slug) {
+                self.left_cursor = idx;
+                self.reload_right_side();
             }
-            // Person no longer has a tags field; nothing to merge.
-            let _ = self.store.save_person(&existing);
-            // Delete the auto-generated person
-            let _ = self.store.delete_person(&old_slug);
-        } else {
-            // Rename: delete old, create new with updated slug
-            let person = &self.people[self.left_cursor];
-            let mut renamed = person.clone();
-            renamed.slug = new_slug.clone();
-            let _ = self.store.delete_person(&old_slug);
-            let _ = self.store.save_person(&renamed);
-        }
-
-        // Reload to pick up the change
-        self.reload();
-        // Re-select the person by new slug
-        if let Some(idx) = self.people.iter().position(|p| p.slug == new_slug) {
-            self.left_cursor = idx;
-            self.reload_right_side();
         }
     }
 
@@ -733,6 +721,10 @@ impl View for PeopleView {
             return self.handle_slug_edit_key(*code);
         }
 
+        if self.rename_editing {
+            return self.handle_rename_key(*code);
+        }
+
         if self.show_meta_popup {
             if self.editing_metadata {
                 return self.handle_meta_edit_key(*code);
@@ -821,10 +813,14 @@ impl View for PeopleView {
         if self.slug_editing {
             self.draw_slug_edit_popup(frame, main_area, theme);
         }
+
+        if self.rename_editing {
+            self.draw_rename_popup(frame, main_area, theme);
+        }
     }
 
     fn captures_input(&self) -> bool {
-        self.slug_editing || self.show_meta_popup || self.editing_metadata || self.agenda_editing || self.confirm_delete.is_some()
+        self.slug_editing || self.rename_editing || self.show_meta_popup || self.editing_metadata || self.agenda_editing || self.confirm_delete.is_some()
     }
 }
 
@@ -964,14 +960,10 @@ impl PeopleView {
             KeyCode::Char('e') => {
                 match self.focus {
                     PeopleFocus::Sidebar => {
-                        // Switch to metadata focus; if fields exist, edit first one; otherwise add new
-                        self.focus = PeopleFocus::Metadata;
-                        if self.meta_keys.is_empty() {
-                            self.add_meta_field();
-                        } else {
-                            self.meta_cursor = 0;
-                            self.meta_field = self.meta_keys[0].clone();
-                            self.start_meta_edit();
+                        if let Some(person) = self.people.get(self.left_cursor) {
+                            self.rename_input = person.slug.clone();
+                            self.rename_error = None;
+                            self.rename_editing = true;
                         }
                         None
                     }
@@ -1281,6 +1273,119 @@ impl PeopleView {
             Line::from(""),
             Line::from(Span::styled("  Enter to confirm · Esc to cancel", theme.dim)),
         ];
+
+        frame.render_widget(Paragraph::new(lines), inner);
+    }
+
+    fn handle_rename_key(&mut self, code: KeyCode) -> Option<AppMessage> {
+        match code {
+            KeyCode::Enter => {
+                let new_slug = self.rename_input.trim()
+                    .to_lowercase()
+                    .chars()
+                    .map(|c| if c.is_alphanumeric() || c == '-' { c } else { '-' })
+                    .collect::<String>()
+                    .trim_matches('-')
+                    .to_string();
+
+                if new_slug.is_empty() {
+                    self.rename_error = Some("Slug cannot be empty".into());
+                    return None;
+                }
+
+                let old_slug = match self.people.get(self.left_cursor) {
+                    Some(p) => p.slug.clone(),
+                    None => { self.rename_editing = false; return None; }
+                };
+
+                if new_slug == old_slug {
+                    self.rename_editing = false;
+                    self.rename_input.clear();
+                    self.rename_error = None;
+                    return None;
+                }
+
+                match self.store.rename_person(&old_slug, &new_slug) {
+                    Ok(()) => {
+                        self.rename_editing = false;
+                        self.rename_input.clear();
+                        self.rename_error = None;
+                        self.reload();
+                        if let Some(idx) = self.people.iter().position(|p| p.slug == new_slug) {
+                            self.left_cursor = idx;
+                            self.reload_right_side();
+                        }
+                        Some(AppMessage::Reload)
+                    }
+                    Err(_) => {
+                        self.rename_error = Some(format!("@{} already exists", new_slug));
+                        None
+                    }
+                }
+            }
+            KeyCode::Esc => {
+                self.rename_editing = false;
+                self.rename_input.clear();
+                self.rename_error = None;
+                None
+            }
+            KeyCode::Backspace => {
+                self.rename_input.pop();
+                self.rename_error = None;
+                None
+            }
+            KeyCode::Char(c) => {
+                self.rename_input.push(c);
+                self.rename_error = None;
+                None
+            }
+            _ => None,
+        }
+    }
+
+    fn draw_rename_popup(&self, frame: &mut Frame, area: Rect, theme: &Theme) {
+        let Some(person) = self.people.get(self.left_cursor) else { return; };
+
+        let popup_h = if self.rename_error.is_some() { 7u16 } else { 5u16 };
+        let popup_w = 52u16.min(area.width.saturating_sub(4)).max(32);
+
+        let popup_rect = Rect {
+            x: area.x + area.width.saturating_sub(popup_w) / 2,
+            y: area.y + area.height.saturating_sub(popup_h) / 2,
+            width: popup_w,
+            height: popup_h,
+        };
+
+        frame.render_widget(Clear, popup_rect);
+
+        let block = Block::default()
+            .borders(Borders::ALL)
+            .border_style(theme.border)
+            .title(Span::styled(format!(" Rename @{} ", person.slug), theme.person));
+
+        let inner = block.inner(popup_rect);
+        frame.render_widget(block, popup_rect);
+
+        let max_w = inner.width.saturating_sub(10) as usize;
+        let input_display = format!("@{}|", self.rename_input);
+        let input_display = truncate(&input_display, max_w);
+
+        let mut lines = vec![
+            Line::from(vec![
+                Span::styled("  Slug  ", theme.dim),
+                Span::styled(input_display, theme.person),
+            ]),
+            Line::from(""),
+            Line::from(Span::styled("  Enter to confirm · Esc to cancel", theme.dim)),
+        ];
+
+        if let Some(ref err) = self.rename_error {
+            lines.push(Line::from(""));
+            lines.push(Line::from(Span::styled(
+                format!("  {}", truncate(err, inner.width.saturating_sub(4) as usize)),
+                theme.error,
+            )));
+        }
 
         frame.render_widget(Paragraph::new(lines), inner);
     }

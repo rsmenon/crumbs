@@ -32,6 +32,11 @@ pub trait Store: Send + Sync {
     fn list_persons(&self) -> Result<Vec<Person>>;
     fn save_person(&self, person: &Person) -> Result<()>;
     fn delete_person(&self, slug: &str) -> Result<()>;
+    /// Rename a person's slug atomically: updates the persons row, cascades to
+    /// person_metadata and agendas via FK, rewrites entity_refs and FTS, and
+    /// replaces @old_slug with @new_slug in task/note/agenda text fields.
+    /// Returns an error if `new_slug` already exists.
+    fn rename_person(&self, old_slug: &str, new_slug: &str) -> Result<()>;
 
     // ── Tags ─────────────────────────────────────────────────────
 

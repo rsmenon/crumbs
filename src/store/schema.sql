@@ -52,7 +52,7 @@ CREATE TABLE IF NOT EXISTS persons (
 );
 
 CREATE TABLE IF NOT EXISTS person_metadata (
-    person_slug TEXT NOT NULL REFERENCES persons(slug) ON DELETE CASCADE,
+    person_slug TEXT NOT NULL REFERENCES persons(slug) ON DELETE CASCADE ON UPDATE CASCADE,
     key         TEXT NOT NULL,
     value       TEXT NOT NULL,
     PRIMARY KEY (person_slug, key)
@@ -68,7 +68,7 @@ CREATE TABLE IF NOT EXISTS tags (
 CREATE TABLE IF NOT EXISTS agendas (
     id          TEXT PRIMARY KEY,
     title       TEXT NOT NULL DEFAULT '',
-    person_slug TEXT NOT NULL,
+    person_slug TEXT NOT NULL REFERENCES persons(slug) ON DELETE CASCADE ON UPDATE CASCADE,
     date        TEXT NOT NULL,
     created_at  TEXT NOT NULL,
     updated_at  TEXT NOT NULL,

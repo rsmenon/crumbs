@@ -29,10 +29,60 @@ impl SqliteStore {
         // Create tables if they don't exist.
         conn.execute_batch(SCHEMA)?;
 
+        // Run incremental schema migrations.
+        run_migrations(&conn)?;
+
         Ok(Self {
             conn: Mutex::new(conn),
         })
     }
+}
+
+// ── Migrations ─────────────────────────────────────────────────────
+
+fn run_migrations(conn: &Connection) -> Result<()> {
+    let version: i64 = conn.query_row("PRAGMA user_version", [], |row| row.get(0))?;
+
+    if version < 1 {
+        // Migration 1: add ON UPDATE CASCADE to person_metadata and agendas.
+        // Requires table recreation since SQLite does not support ALTER CONSTRAINT.
+        conn.execute_batch("
+            PRAGMA foreign_keys = OFF;
+            BEGIN;
+
+            CREATE TABLE person_metadata_new (
+                person_slug TEXT NOT NULL REFERENCES persons(slug) ON DELETE CASCADE ON UPDATE CASCADE,
+                key         TEXT NOT NULL,
+                value       TEXT NOT NULL,
+                PRIMARY KEY (person_slug, key)
+            );
+            INSERT OR IGNORE INTO person_metadata_new SELECT * FROM person_metadata;
+            DROP TABLE person_metadata;
+            ALTER TABLE person_metadata_new RENAME TO person_metadata;
+
+            CREATE TABLE agendas_new (
+                id          TEXT PRIMARY KEY,
+                title       TEXT NOT NULL DEFAULT '',
+                person_slug TEXT NOT NULL REFERENCES persons(slug) ON DELETE CASCADE ON UPDATE CASCADE,
+                date        TEXT NOT NULL,
+                created_at  TEXT NOT NULL,
+                updated_at  TEXT NOT NULL,
+                body        TEXT NOT NULL DEFAULT ''
+            );
+            INSERT OR IGNORE INTO agendas_new SELECT * FROM agendas;
+            DROP TABLE agendas;
+            ALTER TABLE agendas_new RENAME TO agendas;
+
+            CREATE INDEX IF NOT EXISTS idx_agendas_person ON agendas(person_slug);
+            CREATE INDEX IF NOT EXISTS idx_agendas_date ON agendas(date);
+
+            PRAGMA user_version = 1;
+            COMMIT;
+            PRAGMA foreign_keys = ON;
+        ")?;
+    }
+
+    Ok(())
 }
 
 // ── Helper functions ───────────────────────────────────────────────
@@ -58,6 +108,34 @@ fn ensure_tag_exists(tx: &Transaction, slug: &str) -> Result<()> {
         update_fts(tx, "tag", slug, slug)?;
     }
     Ok(())
+}
+
+/// Replace `@old_slug` with `@new_slug` using word-boundary awareness.
+///
+/// A match is only replaced when the character immediately following the slug
+/// is not alphanumeric or `-`, preventing `@foo` from corrupting `@foobar`.
+fn replace_mention(text: &str, old_slug: &str, new_slug: &str) -> String {
+    let pattern = format!("@{}", old_slug);
+    let replacement = format!("@{}", new_slug);
+    let mut result = String::with_capacity(text.len() + replacement.len());
+    let mut pos = 0;
+    while let Some(rel) = text[pos..].find(&pattern) {
+        let abs = pos + rel;
+        let after = abs + pattern.len();
+        let boundary = text[after..].chars().next()
+            .map(|c| !c.is_alphanumeric() && c != '-')
+            .unwrap_or(true);
+        if boundary {
+            result.push_str(&text[pos..abs]);
+            result.push_str(&replacement);
+            pos = after;
+        } else {
+            result.push_str(&text[pos..abs + 1]);
+            pos = abs + 1;
+        }
+    }
+    result.push_str(&text[pos..]);
+    result
 }
 
 /// Merge @mentions and #tags extracted from `text` into `refs` (additive, no duplicates).
@@ -869,5 +947,133 @@ impl Store for SqliteStore {
         }
 
         scores
+    }
+
+    fn rename_person(&self, old_slug: &str, new_slug: &str) -> Result<()> {
+        anyhow::ensure!(old_slug != new_slug, "new slug is the same as the old one");
+
+        let mut conn = self.conn.lock().unwrap();
+
+        // Reject if new_slug already exists.
+        let exists: bool = conn.query_row(
+            "SELECT COUNT(*) FROM persons WHERE slug = ?1",
+            params![new_slug],
+            |row| row.get::<_, i64>(0),
+        )? > 0;
+        anyhow::ensure!(!exists, "a person with slug @{} already exists", new_slug);
+
+        // Collect tasks whose title or description mention the old slug.
+        let like = format!("%@{}%", old_slug);
+        let tasks: Vec<(String, String, String)> = {
+            let mut stmt = conn.prepare(
+                "SELECT id, title, description FROM tasks WHERE title LIKE ?1 OR description LIKE ?1",
+            )?;
+            stmt.query_map(params![like], |row| {
+                Ok((row.get(0)?, row.get(1)?, row.get(2)?))
+            })?.flatten().collect()
+        };
+
+        // Collect notes whose title or body mention the old slug.
+        let notes: Vec<(String, String, String)> = {
+            let mut stmt = conn.prepare(
+                "SELECT id, title, body FROM notes WHERE title LIKE ?1 OR body LIKE ?1",
+            )?;
+            stmt.query_map(params![like], |row| {
+                Ok((row.get(0)?, row.get(1)?, row.get(2)?))
+            })?.flatten().collect()
+        };
+
+        // Collect agendas that either belong to this person or mention the slug in text.
+        let agendas: Vec<(String, String, String)> = {
+            let mut stmt = conn.prepare(
+                "SELECT id, title, body FROM agendas WHERE person_slug = ?1 OR title LIKE ?2 OR body LIKE ?2",
+            )?;
+            stmt.query_map(params![old_slug, like], |row| {
+                Ok((row.get(0)?, row.get(1)?, row.get(2)?))
+            })?.flatten().collect()
+        };
+
+        let tx = conn.transaction()?;
+
+        // 1. Rename the persons row — cascades to person_metadata and agendas.person_slug
+        //    via ON UPDATE CASCADE (requires foreign_keys = ON, set at connection open).
+        tx.execute("UPDATE persons SET slug = ?1 WHERE slug = ?2", params![new_slug, old_slug])?;
+
+        // 2. Rewrite entity_refs (no FK on this table).
+        tx.execute(
+            "UPDATE entity_refs SET target_id = ?1 WHERE target_kind = 'person' AND target_id = ?2",
+            params![new_slug, old_slug],
+        )?;
+
+        // 3. Rebuild FTS entry for the person.
+        tx.execute(
+            "DELETE FROM fts_entities WHERE entity_kind = 'person' AND entity_id = ?1",
+            params![old_slug],
+        )?;
+        let meta_text: String = {
+            let mut stmt = tx.prepare("SELECT value FROM person_metadata WHERE person_slug = ?1")?;
+            stmt.query_map(params![new_slug], |row| row.get::<_, String>(0))?
+                .flatten()
+                .collect::<Vec<_>>()
+                .join(" ")
+        };
+        tx.execute(
+            "INSERT INTO fts_entities (entity_id, entity_kind, content) VALUES (?1, 'person', ?2)",
+            params![new_slug, format!("{} {}", new_slug, meta_text)],
+        )?;
+
+        // 4. Rewrite @old_slug in task text and update FTS.
+        for (id, title, desc) in tasks {
+            let new_title = replace_mention(&title, old_slug, new_slug);
+            let new_desc  = replace_mention(&desc,  old_slug, new_slug);
+            if new_title != title || new_desc != desc {
+                tx.execute(
+                    "UPDATE tasks SET title = ?1, description = ?2 WHERE id = ?3",
+                    params![new_title, new_desc, id],
+                )?;
+                tx.execute("DELETE FROM fts_entities WHERE entity_id = ?1 AND entity_kind = 'task'", params![id])?;
+                tx.execute(
+                    "INSERT INTO fts_entities (entity_id, entity_kind, content) VALUES (?1, 'task', ?2)",
+                    params![id, format!("{} {}", new_title, new_desc)],
+                )?;
+            }
+        }
+
+        // 5. Rewrite @old_slug in note text and update FTS.
+        for (id, title, body) in notes {
+            let new_title = replace_mention(&title, old_slug, new_slug);
+            let new_body  = replace_mention(&body,  old_slug, new_slug);
+            if new_title != title || new_body != body {
+                tx.execute(
+                    "UPDATE notes SET title = ?1, body = ?2 WHERE id = ?3",
+                    params![new_title, new_body, id],
+                )?;
+                tx.execute("DELETE FROM fts_entities WHERE entity_id = ?1 AND entity_kind = 'note'", params![id])?;
+                tx.execute(
+                    "INSERT INTO fts_entities (entity_id, entity_kind, content) VALUES (?1, 'note', ?2)",
+                    params![id, format!("{} {}", new_title, new_body)],
+                )?;
+            }
+        }
+
+        // 6. Rewrite @old_slug in agenda text and update FTS.
+        for (id, title, body) in agendas {
+            let new_title = replace_mention(&title, old_slug, new_slug);
+            let new_body  = replace_mention(&body,  old_slug, new_slug);
+            if new_title != title || new_body != body {
+                tx.execute(
+                    "UPDATE agendas SET title = ?1, body = ?2 WHERE id = ?3",
+                    params![new_title, new_body, id],
+                )?;
+                tx.execute("DELETE FROM fts_entities WHERE entity_id = ?1 AND entity_kind = 'agenda'", params![id])?;
+                tx.execute(
+                    "INSERT INTO fts_entities (entity_id, entity_kind, content) VALUES (?1, 'agenda', ?2)",
+                    params![id, format!("{} {}", new_title, new_body)],
+                )?;
+            }
+        }
+
+        tx.commit()?;
+        Ok(())
     }
 }
