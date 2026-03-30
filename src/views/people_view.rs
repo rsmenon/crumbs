@@ -19,7 +19,6 @@ use super::{icons, mask_private, truncate, View};
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum PeopleFocus {
     Sidebar,
-    Metadata,
     Agendas,
     Timeline,
 }
@@ -28,7 +27,6 @@ impl PeopleFocus {
     fn next(self) -> Self {
         match self {
             Self::Sidebar => Self::Agendas,
-            Self::Metadata => Self::Agendas,
             Self::Agendas => Self::Timeline,
             Self::Timeline => Self::Sidebar,
         }
@@ -37,7 +35,6 @@ impl PeopleFocus {
     fn prev(self) -> Self {
         match self {
             Self::Sidebar => Self::Timeline,
-            Self::Metadata => Self::Sidebar,
             Self::Agendas => Self::Sidebar,
             Self::Timeline => Self::Agendas,
         }
@@ -179,6 +176,7 @@ pub struct PeopleView {
     // Rename slug (existing person)
     rename_editing: bool,
     rename_input: String,
+    rename_cursor: usize,
     rename_error: Option<String>,
 }
 
@@ -222,11 +220,26 @@ impl PeopleView {
             slug_input: String::new(),
             rename_editing: false,
             rename_input: String::new(),
+            rename_cursor: 0,
             rename_error: None,
         }
     }
 
     // ── Data loading ─────────────────────────────────────────────
+
+    /// Full reload: re-fetches and re-sorts the people list, then refreshes the
+    /// right-side panels.  Call only on tab entry or when the list itself changes
+    /// (archive toggle, pin, rename).
+    pub fn on_tab_entered(&mut self) {
+        self.reload();
+    }
+
+    /// Refresh only the detail panels (agendas + timeline) for the currently
+    /// selected person, without re-sorting `self.people`.  Call this after
+    /// mutations that change agenda/metadata data but should not move the cursor.
+    fn reload_detail(&mut self) {
+        self.reload_right_side();
+    }
 
     fn reload(&mut self) {
         self.people.clear();
@@ -293,7 +306,9 @@ impl PeopleView {
             archived: false,
             metadata: Default::default(),
         };
-        let _ = self.store.save_person(&person);
+        if let Err(e) = self.store.save_person(&person) {
+            eprintln!("Failed to save person: {e}");
+        }
         // Add directly to list (reload would filter out people without refs)
         self.people.push(person);
         self.people.sort_by(|a, b| a.slug.cmp(&b.slug));
@@ -497,7 +512,9 @@ impl PeopleView {
             person.metadata.insert(new_key.clone(), val.clone());
         }
 
-        let _ = self.store.save_person(person);
+        if let Err(e) = self.store.save_person(person) {
+            eprintln!("Failed to save person: {e}");
+        }
         if new_key == "name" && !val.is_empty() {
             self.maybe_rename_person_slug(&val);
         }
@@ -559,7 +576,9 @@ impl PeopleView {
             }
         }
 
-        let _ = self.store.save_person(person);
+        if let Err(e) = self.store.save_person(person) {
+            eprintln!("Failed to save person: {e}");
+        }
         self.reload_meta_keys();
     }
 
@@ -592,7 +611,9 @@ impl PeopleView {
         };
 
         person.metadata.insert(key.clone(), val.clone());
-        let _ = self.store.save_person(person);
+        if let Err(e) = self.store.save_person(person) {
+            eprintln!("Failed to save person: {e}");
+        }
         if key == "name" && !val.is_empty() {
             self.maybe_rename_person_slug(&val);
         }
@@ -617,7 +638,9 @@ impl PeopleView {
             refs: Default::default(),
         };
         let id = agenda.id.clone();
-        let _ = self.store.save_agenda(&agenda);
+        if let Err(e) = self.store.save_agenda(&agenda) {
+            return Some(AppMessage::Error(format!("Failed to save agenda: {e}")));
+        }
         self.reload_agendas();
         // Open the new agenda in the inline editor
         Some(AppMessage::OpenInlineEditor { kind: EntityKind::Agenda, id })
@@ -625,7 +648,9 @@ impl PeopleView {
 
     fn delete_agenda(&mut self) {
         if let Some(agenda) = self.agendas.get(self.agenda_cursor).cloned() {
-            let _ = self.store.delete_agenda(&agenda.id);
+            if let Err(e) = self.store.delete_agenda(&agenda.id) {
+                eprintln!("Failed to delete agenda: {e}");
+            }
             self.reload_agendas();
             if self.agenda_cursor > 0 && self.agenda_cursor >= self.agendas.len() {
                 self.agenda_cursor = self.agendas.len().saturating_sub(1);
@@ -676,7 +701,9 @@ impl PeopleView {
         }
 
         agenda.updated_at = chrono::Utc::now();
-        let _ = self.store.save_agenda(agenda);
+        if let Err(e) = self.store.save_agenda(agenda) {
+            eprintln!("Failed to save agenda: {e}");
+        }
         self.agenda_input.clear();
         self.reload_agendas();
     }
@@ -742,7 +769,11 @@ impl View for PeopleView {
     fn handle_message(&mut self, msg: &AppMessage) {
         match msg {
             AppMessage::Reload => {
-                self.reload();
+                // Only refresh detail panels; the people list sort is preserved
+                // so that the cursor does not jump after agenda/metadata mutations.
+                // A full re-sort is triggered by on_tab_entered() when the tab is
+                // actually entered.
+                self.reload_detail();
             }
             AppMessage::TagFilterChanged(filter) => {
                 self.tag_filter = filter.clone();
@@ -857,14 +888,6 @@ impl PeopleView {
                             self.reload_right_side();
                         }
                     }
-                    PeopleFocus::Metadata => {
-                        if !self.meta_keys.is_empty()
-                            && self.meta_cursor + 1 < self.meta_keys.len()
-                        {
-                            self.meta_cursor += 1;
-                            self.meta_field = self.meta_keys[self.meta_cursor].clone();
-                        }
-                    }
                     PeopleFocus::Agendas => {
                         if !self.agendas.is_empty()
                             && self.agenda_cursor + 1 < self.agendas.len()
@@ -890,12 +913,6 @@ impl PeopleView {
                             self.reload_right_side();
                         }
                     }
-                    PeopleFocus::Metadata => {
-                        if self.meta_cursor > 0 {
-                            self.meta_cursor -= 1;
-                            self.meta_field = self.meta_keys[self.meta_cursor].clone();
-                        }
-                    }
                     PeopleFocus::Agendas => {
                         if self.agenda_cursor > 0 {
                             self.agenda_cursor -= 1;
@@ -915,12 +932,6 @@ impl PeopleView {
                         self.left_cursor = 0;
                         self.reload_right_side();
                     }
-                    PeopleFocus::Metadata => {
-                        self.meta_cursor = 0;
-                        if let Some(f) = self.meta_keys.first() {
-                            self.meta_field = f.clone();
-                        }
-                    }
                     PeopleFocus::Agendas => {
                         self.agenda_cursor = 0;
                     }
@@ -936,12 +947,6 @@ impl PeopleView {
                         if !self.people.is_empty() {
                             self.left_cursor = self.people.len() - 1;
                             self.reload_right_side();
-                        }
-                    }
-                    PeopleFocus::Metadata => {
-                        if !self.meta_keys.is_empty() {
-                            self.meta_cursor = self.meta_keys.len() - 1;
-                            self.meta_field = self.meta_keys[self.meta_cursor].clone();
                         }
                     }
                     PeopleFocus::Agendas => {
@@ -962,16 +967,9 @@ impl PeopleView {
                     PeopleFocus::Sidebar => {
                         if let Some(person) = self.people.get(self.left_cursor) {
                             self.rename_input = person.slug.clone();
+                            self.rename_cursor = self.rename_input.len();
                             self.rename_error = None;
                             self.rename_editing = true;
-                        }
-                        None
-                    }
-                    PeopleFocus::Metadata => {
-                        if self.meta_keys.is_empty() {
-                            self.add_meta_field();
-                        } else {
-                            self.start_meta_edit();
                         }
                         None
                     }
@@ -1027,10 +1025,6 @@ impl PeopleView {
                         self.create_person();
                         None
                     }
-                    PeopleFocus::Metadata => {
-                        self.add_meta_field();
-                        None
-                    }
                     PeopleFocus::Agendas => {
                         self.create_agenda()
                     }
@@ -1039,15 +1033,6 @@ impl PeopleView {
             }
             KeyCode::Char('d') => {
                 match self.focus {
-                    PeopleFocus::Metadata => {
-                        // Metadata fields: ask confirmation
-                        if let Some(MetaField(key)) = self.meta_keys.get(self.meta_cursor) {
-                            if !key.is_empty() {
-                                self.confirm_delete = Some((PeopleFocus::Metadata, key.clone()));
-                            }
-                        }
-                        None
-                    }
                     PeopleFocus::Agendas => {
                         if let Some(agenda) = self.agendas.get(self.agenda_cursor) {
                             self.confirm_delete = Some((PeopleFocus::Agendas, agenda.title.clone()));
@@ -1073,10 +1058,6 @@ impl PeopleView {
                             MetaPopupFocus::Rows
                         };
                         self.meta_editing_mode = false;
-                        None
-                    }
-                    PeopleFocus::Metadata => {
-                        self.start_meta_edit();
                         None
                     }
                     PeopleFocus::Agendas => {
@@ -1138,7 +1119,9 @@ impl PeopleView {
                         if updated.archived {
                             updated.pinned = false; // archived implies not pinned
                         }
-                        let _ = self.store.save_person(&updated);
+                        if let Err(e) = self.store.save_person(&updated) {
+                            return Some(AppMessage::Error(format!("Failed to save person: {e}")));
+                        }
                         self.reload();
                     }
                 }
@@ -1154,7 +1137,9 @@ impl PeopleView {
                     if let Some(person) = self.people.get(self.left_cursor).cloned() {
                         let mut updated = person;
                         updated.pinned = !updated.pinned;
-                        let _ = self.store.save_person(&updated);
+                        if let Err(e) = self.store.save_person(&updated) {
+                            return Some(AppMessage::Error(format!("Failed to save person: {e}")));
+                        }
                         self.reload();
                     }
                 }
@@ -1301,6 +1286,7 @@ impl PeopleView {
                 if new_slug == old_slug {
                     self.rename_editing = false;
                     self.rename_input.clear();
+                    self.rename_cursor = 0;
                     self.rename_error = None;
                     return None;
                 }
@@ -1309,6 +1295,7 @@ impl PeopleView {
                     Ok(()) => {
                         self.rename_editing = false;
                         self.rename_input.clear();
+                        self.rename_cursor = 0;
                         self.rename_error = None;
                         self.reload();
                         if let Some(idx) = self.people.iter().position(|p| p.slug == new_slug) {
@@ -1326,16 +1313,53 @@ impl PeopleView {
             KeyCode::Esc => {
                 self.rename_editing = false;
                 self.rename_input.clear();
+                self.rename_cursor = 0;
                 self.rename_error = None;
                 None
             }
             KeyCode::Backspace => {
-                self.rename_input.pop();
+                if self.rename_cursor > 0 {
+                    let mut prev = self.rename_cursor - 1;
+                    while prev > 0 && !self.rename_input.is_char_boundary(prev) {
+                        prev -= 1;
+                    }
+                    self.rename_input.drain(prev..self.rename_cursor);
+                    self.rename_cursor = prev;
+                }
                 self.rename_error = None;
                 None
             }
+            KeyCode::Left => {
+                if self.rename_cursor > 0 {
+                    let mut prev = self.rename_cursor - 1;
+                    while prev > 0 && !self.rename_input.is_char_boundary(prev) {
+                        prev -= 1;
+                    }
+                    self.rename_cursor = prev;
+                }
+                None
+            }
+            KeyCode::Right => {
+                if self.rename_cursor < self.rename_input.len() {
+                    let mut next = self.rename_cursor + 1;
+                    while next < self.rename_input.len() && !self.rename_input.is_char_boundary(next) {
+                        next += 1;
+                    }
+                    self.rename_cursor = next;
+                }
+                None
+            }
+            KeyCode::Home => {
+                self.rename_cursor = 0;
+                None
+            }
+            KeyCode::End => {
+                self.rename_cursor = self.rename_input.len();
+                None
+            }
             KeyCode::Char(c) => {
-                self.rename_input.push(c);
+                self.rename_input.insert(self.rename_cursor, c);
+                self.rename_cursor += c.len_utf8();
                 self.rename_error = None;
                 None
             }
@@ -1361,13 +1385,15 @@ impl PeopleView {
         let block = Block::default()
             .borders(Borders::ALL)
             .border_style(theme.border)
-            .title(Span::styled(format!(" Rename @{} ", person.slug), theme.person));
+            .title(Span::styled(format!(" Rename @{} ", person.slug), theme.title));
 
         let inner = block.inner(popup_rect);
         frame.render_widget(block, popup_rect);
 
         let max_w = inner.width.saturating_sub(10) as usize;
-        let input_display = format!("@{}|", self.rename_input);
+        let before = &self.rename_input[..self.rename_cursor];
+        let after = &self.rename_input[self.rename_cursor..];
+        let input_display = format!("@{}|{}", before, after);
         let input_display = truncate(&input_display, max_w);
 
         let mut lines = vec![
@@ -1470,7 +1496,7 @@ impl PeopleView {
                 if self.meta_editing_mode {
                     if let Some(MetaField(key)) = self.meta_keys.get(self.meta_cursor) {
                         if !key.is_empty() {
-                            self.confirm_delete = Some((PeopleFocus::Metadata, key.clone()));
+                            self.confirm_delete = Some((PeopleFocus::Sidebar, key.clone()));
                         }
                     }
                 }
@@ -1485,7 +1511,7 @@ impl PeopleView {
             KeyCode::Char('y') | KeyCode::Char('Y') => {
                 if let Some((focus, _title)) = self.confirm_delete.take() {
                     match focus {
-                        PeopleFocus::Metadata => {
+                        PeopleFocus::Sidebar => {
                             self.delete_meta_field();
                         }
                         PeopleFocus::Agendas => {
@@ -1495,16 +1521,18 @@ impl PeopleView {
                             if let Some(item) = self.timeline.get(self.timeline_cursor) {
                                 let item_id = item.id.clone();
                                 let item_kind = item.kind.clone();
-                                match item_kind {
-                                    EntityKind::Task => { let _ = self.store.delete_task(&item_id); }
-                                    EntityKind::Note => { let _ = self.store.delete_note(&item_id); }
-                                    EntityKind::Agenda => { let _ = self.store.delete_agenda(&item_id); }
-                                    _ => {}
+                                let del_result = match item_kind {
+                                    EntityKind::Task => self.store.delete_task(&item_id),
+                                    EntityKind::Note => self.store.delete_note(&item_id),
+                                    EntityKind::Agenda => self.store.delete_agenda(&item_id),
+                                    _ => Ok(()),
+                                };
+                                if let Err(e) = del_result {
+                                    return Some(AppMessage::Error(format!("Failed to delete: {e}")));
                                 }
                                 self.reload();
                             }
                         }
-                        _ => {}
                     }
                 }
                 Some(AppMessage::Reload)
@@ -1630,86 +1658,6 @@ impl PeopleView {
         self.draw_bottom(frame, area, theme);
     }
 
-    #[allow(dead_code)]
-    fn draw_metadata(&self, frame: &mut Frame, area: Rect, theme: &Theme) {
-        let focused = self.focus == PeopleFocus::Metadata;
-        let (title_style, border_style) = self.section_styles(focused, theme);
-
-        let block = Block::default()
-            .borders(Borders::ALL)
-            .border_style(border_style)
-            .title(Span::styled(" Info ", title_style));
-
-        let inner = block.inner(area);
-        frame.render_widget(block, area);
-
-        let mut lines: Vec<Line> = Vec::new();
-
-        let visible_rows = inner.height as usize;
-        let max_label_w = inner.width.saturating_sub(2) as usize;
-
-        if let Some(person) = self.people.get(self.left_cursor) {
-            for (i, field) in self.meta_keys.iter().enumerate().take(visible_rows) {
-                let is_selected = self.focus == PeopleFocus::Metadata && i == self.meta_cursor;
-
-                let (label, value) = match field {
-                    MetaField(key) => {
-                        (key.clone(), person.metadata.get(key).cloned().unwrap_or_default())
-                    }
-                };
-
-                let display_text = if self.editing_metadata && is_selected {
-                    format!("  {}: {}|", label, self.meta_input)
-                } else if value.is_empty() {
-                    format!("  {}: -", label)
-                } else {
-                    format!("  {}: {}", label, value)
-                };
-
-                let display_text = truncate(&display_text, max_label_w);
-
-                let style = if self.editing_metadata && is_selected {
-                    theme.column_focus
-                } else if is_selected {
-                    theme.column_focus
-                } else {
-                    theme.dim
-                };
-
-                let mut line = Line::from(Span::styled(display_text, style));
-                if is_selected && !self.editing_metadata {
-                    line = line.style(theme.row_gray);
-                }
-                lines.push(line);
-            }
-        }
-
-        // If adding a new field (editing with empty key), show the input line
-        if self.editing_metadata {
-            let MetaField(ref key) = self.meta_field;
-            if key.is_empty() && lines.len() < area.height as usize {
-                let input_text = format!("  > {}|", self.meta_input);
-                lines.push(Line::from(Span::styled(
-                    truncate(&input_text, max_label_w),
-                    theme.column_focus,
-                )));
-            }
-        }
-
-        // Show hint when metadata section is focused and there's room
-        if self.focus == PeopleFocus::Metadata && !self.editing_metadata {
-            if lines.len() < visible_rows {
-                lines.push(Line::from(Span::styled(
-                    " e:edit  n:add (key: value)  d:delete",
-                    theme.dim,
-                )));
-            }
-        }
-
-        let para = Paragraph::new(lines);
-        frame.render_widget(para, inner);
-    }
-
     fn draw_meta_popup(&self, frame: &mut Frame, area: Rect, theme: &Theme) {
         let Some(person) = self.people.get(self.left_cursor) else { return; };
 
@@ -1732,7 +1680,7 @@ impl PeopleView {
         let block = Block::default()
             .borders(Borders::ALL)
             .border_style(theme.border)
-            .title(Span::styled(format!(" @{} ", person.slug), theme.person));
+            .title(Span::styled(format!(" @{} ", person.slug), theme.title));
 
         let inner = block.inner(popup_rect);
         frame.render_widget(block, popup_rect);

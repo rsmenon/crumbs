@@ -21,6 +21,10 @@ impl SqliteStore {
         let conn = Connection::open(path)
             .with_context(|| format!("opening database at {}", path.display()))?;
 
+        // Give other processes up to 5 s to release their lock before failing.
+        conn.busy_timeout(std::time::Duration::from_secs(5))
+            .with_context(|| format!("database at {} is locked by another process — close other instances of crumbs and try again", path.display()))?;
+
         // Run PRAGMAs before schema (journal_mode, foreign_keys, synchronous
         // are in the schema SQL but journal_mode must be set before any table
         // creation in some SQLite builds).
@@ -112,8 +116,11 @@ fn ensure_tag_exists(tx: &Transaction, slug: &str) -> Result<()> {
 
 /// Replace `@old_slug` with `@new_slug` using word-boundary awareness.
 ///
-/// A match is only replaced when the character immediately following the slug
-/// is not alphanumeric or `-`, preventing `@foo` from corrupting `@foobar`.
+/// A match is only replaced when:
+/// - the character immediately preceding `@` is not alphanumeric, `-`, or `_`
+///   (prevents matching inside email-like strings such as `info@joe.com`)
+/// - the character immediately following the slug is not alphanumeric, `-`, or `_`
+///   (prevents `@foo` from corrupting `@foobar` or `@foo_bar`)
 fn replace_mention(text: &str, old_slug: &str, new_slug: &str) -> String {
     let pattern = format!("@{}", old_slug);
     let replacement = format!("@{}", new_slug);
@@ -122,10 +129,13 @@ fn replace_mention(text: &str, old_slug: &str, new_slug: &str) -> String {
     while let Some(rel) = text[pos..].find(&pattern) {
         let abs = pos + rel;
         let after = abs + pattern.len();
+        let preceded_by_word_char = text[..abs].chars().next_back()
+            .map(|c| c.is_alphanumeric() || c == '-' || c == '_')
+            .unwrap_or(false);
         let boundary = text[after..].chars().next()
-            .map(|c| !c.is_alphanumeric() && c != '-')
+            .map(|c| !c.is_alphanumeric() && c != '-' && c != '_')
             .unwrap_or(true);
-        if boundary {
+        if !preceded_by_word_char && boundary {
             result.push_str(&text[pos..abs]);
             result.push_str(&replacement);
             pos = after;
@@ -199,13 +209,19 @@ fn save_entity_refs(tx: &Transaction, source_kind: &str, source_id: &str, refs: 
 fn load_refs(conn: &Connection, source_kind: &str, source_id: &str) -> Refs {
     let mut refs = Refs::default();
 
-    let mut stmt = conn.prepare(
+    let mut stmt = match conn.prepare(
         "SELECT target_kind, target_id FROM entity_refs WHERE source_kind = ?1 AND source_id = ?2"
-    ).unwrap();
+    ) {
+        Ok(s) => s,
+        Err(_) => return refs,
+    };
 
-    let rows = stmt.query_map(params![source_kind, source_id], |row| {
+    let rows = match stmt.query_map(params![source_kind, source_id], |row| {
         Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
-    }).unwrap();
+    }) {
+        Ok(r) => r,
+        Err(_) => return refs,
+    };
 
     for row in rows {
         if let Ok((kind, id)) = row {
@@ -403,9 +419,11 @@ impl Store for SqliteStore {
 
     fn delete_task(&self, id: &str) -> Result<()> {
         let conn = self.conn.lock().unwrap();
-        conn.execute("DELETE FROM tasks WHERE id = ?1", params![id])?;
-        conn.execute("DELETE FROM entity_refs WHERE source_kind = 'task' AND source_id = ?1", params![id])?;
-        conn.execute("DELETE FROM fts_entities WHERE entity_id = ?1 AND entity_kind = 'task'", params![id])?;
+        let tx = conn.unchecked_transaction()?;
+        tx.execute("DELETE FROM tasks WHERE id = ?1", params![id])?;
+        tx.execute("DELETE FROM entity_refs WHERE source_kind = 'task' AND source_id = ?1", params![id])?;
+        tx.execute("DELETE FROM fts_entities WHERE entity_id = ?1 AND entity_kind = 'task'", params![id])?;
+        tx.commit()?;
         Ok(())
     }
 
@@ -501,9 +519,11 @@ impl Store for SqliteStore {
 
     fn delete_note(&self, id: &str) -> Result<()> {
         let conn = self.conn.lock().unwrap();
-        conn.execute("DELETE FROM notes WHERE id = ?1", params![id])?;
-        conn.execute("DELETE FROM entity_refs WHERE source_kind = 'note' AND source_id = ?1", params![id])?;
-        conn.execute("DELETE FROM fts_entities WHERE entity_id = ?1 AND entity_kind = 'note'", params![id])?;
+        let tx = conn.unchecked_transaction()?;
+        tx.execute("DELETE FROM notes WHERE id = ?1", params![id])?;
+        tx.execute("DELETE FROM entity_refs WHERE source_kind = 'note' AND source_id = ?1", params![id])?;
+        tx.execute("DELETE FROM fts_entities WHERE entity_id = ?1 AND entity_kind = 'note'", params![id])?;
+        tx.commit()?;
         Ok(())
     }
 
@@ -559,15 +579,15 @@ impl Store for SqliteStore {
 
         // Load metadata for each person
         let persons: Vec<Person> = persons.into_iter().map(|mut p| {
-            let mut meta_stmt = conn.prepare(
+            if let Ok(mut meta_stmt) = conn.prepare(
                 "SELECT key, value FROM person_metadata WHERE person_slug = ?1"
-            ).unwrap();
-            p.metadata = meta_stmt
-                .query_map(params![p.slug], |row| {
+            ) {
+                if let Ok(rows) = meta_stmt.query_map(params![p.slug], |row| {
                     Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
-                }).unwrap()
-                .filter_map(|r| r.ok())
-                .collect();
+                }) {
+                    p.metadata = rows.filter_map(|r| r.ok()).collect();
+                }
+            }
             p
         }).collect();
 
@@ -610,6 +630,7 @@ impl Store for SqliteStore {
     fn delete_person(&self, slug: &str) -> Result<()> {
         let conn = self.conn.lock().unwrap();
         conn.execute("DELETE FROM persons WHERE slug = ?1", params![slug])?;
+        conn.execute("DELETE FROM entity_refs WHERE target_kind = 'person' AND target_id = ?1", params![slug])?;
         conn.execute("DELETE FROM fts_entities WHERE entity_id = ?1 AND entity_kind = 'person'", params![slug])?;
         Ok(())
     }
@@ -782,9 +803,11 @@ impl Store for SqliteStore {
 
     fn delete_agenda(&self, id: &str) -> Result<()> {
         let conn = self.conn.lock().unwrap();
-        conn.execute("DELETE FROM agendas WHERE id = ?1", params![id])?;
-        conn.execute("DELETE FROM entity_refs WHERE source_kind = 'agenda' AND source_id = ?1", params![id])?;
-        conn.execute("DELETE FROM fts_entities WHERE entity_id = ?1 AND entity_kind = 'agenda'", params![id])?;
+        let tx = conn.unchecked_transaction()?;
+        tx.execute("DELETE FROM agendas WHERE id = ?1", params![id])?;
+        tx.execute("DELETE FROM entity_refs WHERE source_kind = 'agenda' AND source_id = ?1", params![id])?;
+        tx.execute("DELETE FROM fts_entities WHERE entity_id = ?1 AND entity_kind = 'agenda'", params![id])?;
+        tx.commit()?;
         Ok(())
     }
 
@@ -880,7 +903,7 @@ impl Store for SqliteStore {
         let mut results = Vec::new();
 
         // Try FTS5 MATCH first
-        let fts_query = format!("{}*", query.replace('"', ""));
+        let fts_query = format!("\"{}\"*", query.replace('"', ""));
         if let Ok(mut stmt) = conn.prepare(
             "SELECT entity_id, entity_kind FROM fts_entities WHERE content MATCH ?1 ORDER BY rank LIMIT 50"
         ) {
@@ -928,9 +951,9 @@ impl Store for SqliteStore {
                 JOIN notes n ON er.source_kind = 'note' AND er.source_id = n.id
                 WHERE er.target_kind = 'person'
 
-                UNION ALL
+                UNION
 
-                SELECT a.person_slug, a.date AS item_date
+                SELECT a.person_slug, a.updated_at AS item_date
                 FROM agendas a
             )
             GROUP BY person_slug

@@ -63,6 +63,13 @@ pub fn render_hint_bar<'a>(
     frame.render_widget(Paragraph::new(Line::from(all)), area);
 }
 
+/// Clamp a byte index to the nearest valid UTF-8 char boundary, searching
+/// backwards. Safe to use as a slice index on the string it came from.
+pub fn floor_char_boundary(s: &str, idx: usize) -> usize {
+    let idx = idx.min(s.len());
+    (0..=idx).rev().find(|&i| s.is_char_boundary(i)).unwrap_or(0)
+}
+
 /// Truncate a string to at most `n` grapheme-approximate characters,
 /// appending an ellipsis if truncated.
 pub fn truncate(s: &str, n: usize) -> String {

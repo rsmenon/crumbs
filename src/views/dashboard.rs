@@ -467,8 +467,16 @@ impl Dashboard {
                         let item_id = entry.item.id.clone();
                         let item_kind = entry.item.kind.clone();
                         match item_kind {
-                            EntityKind::Task => { let _ = self.store.delete_task(&item_id); }
-                            EntityKind::Note => { let _ = self.store.delete_note(&item_id); }
+                            EntityKind::Task => {
+                                if let Err(e) = self.store.delete_task(&item_id) {
+                                    return Some(AppMessage::Error(format!("Failed to delete task: {e}")));
+                                }
+                            }
+                            EntityKind::Note => {
+                                if let Err(e) = self.store.delete_note(&item_id) {
+                                    return Some(AppMessage::Error(format!("Failed to delete note: {e}")));
+                                }
+                            }
                             _ => return None,
                         }
                         self.reload();

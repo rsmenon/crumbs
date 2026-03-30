@@ -11,7 +11,7 @@ use ratatui::Frame;
 use crate::app::message::AppMessage;
 use crate::app::theme::Theme;
 use crate::domain::{Note, Refs};
-use super::{icons, mask_private, truncate, View};
+use super::{detect_private, floor_char_boundary, icons, mask_private, truncate, View};
 use crate::store::Store;
 
 // ── Column enum ──────────────────────────────────────────────────
@@ -233,7 +233,9 @@ impl NoteView {
         }
 
         note.updated_at = chrono::Utc::now();
-        let _ = self.store.save_note(note);
+        if let Err(e) = self.store.save_note(note) {
+            eprintln!("Failed to save note: {e}");
+        }
         self.edit_buf.clear();
     }
 
@@ -440,7 +442,9 @@ impl NoteView {
                     let mut updated = note;
                     updated.pinned = !updated.pinned;
                     updated.updated_at = chrono::Utc::now();
-                    let _ = self.store.save_note(&updated);
+                    if let Err(e) = self.store.save_note(&updated) {
+                        return Some(AppMessage::Error(format!("Failed to save note: {e}")));
+                    }
                     self.reload();
                 }
                 Some(AppMessage::Reload)
@@ -486,7 +490,9 @@ impl NoteView {
                         updated.pinned = false;
                     }
                     updated.updated_at = chrono::Utc::now();
-                    let _ = self.store.save_note(&updated);
+                    if let Err(e) = self.store.save_note(&updated) {
+                        return Some(AppMessage::Error(format!("Failed to save note: {e}")));
+                    }
                     self.reload();
                 }
                 Some(AppMessage::Reload)
@@ -504,11 +510,15 @@ impl NoteView {
         match code {
             KeyCode::Enter => {
                 if let Some(mut note) = self.creating.take() {
-                    let title = self.edit_buf.trim().to_string();
-                    note.title = if title.is_empty() { "Untitled".to_string() } else { title };
+                    let raw_title = self.edit_buf.trim().to_string();
+                    let (clean_title, is_private) = detect_private(if raw_title.is_empty() { "Untitled" } else { &raw_title });
+                    note.title = clean_title;
+                    note.private = is_private;
                     note.updated_at = chrono::Utc::now();
                     let id = note.id.clone();
-                    let _ = self.store.save_note(&note);
+                    if let Err(e) = self.store.save_note(&note) {
+                        return Some(AppMessage::Error(format!("Failed to save note: {e}")));
+                    }
                     self.editing = false;
                     self.edit_buf.clear();
                     self.edit_cursor = 0;
@@ -599,7 +609,9 @@ impl NoteView {
             KeyCode::Char('y') | KeyCode::Char('Y') => {
                 if let Some(idx) = self.confirm_delete.take() {
                     if let Some(note) = self.notes.get(idx).cloned() {
-                        let _ = self.store.delete_note(&note.id);
+                        if let Err(e) = self.store.delete_note(&note.id) {
+                            return Some(AppMessage::Error(format!("Failed to delete note: {e}")));
+                        }
                         self.reload();
                         if self.cursor > 0 && self.cursor >= self.notes.len() {
                             self.cursor = self.notes.len().saturating_sub(1);
@@ -671,8 +683,9 @@ impl NoteView {
         // ── Inline-creating row ──────────────────────────────────
         if let Some(ref _new_note) = self.creating {
             if scroll == 0 && lines.len() <= visible_rows {
-                let before = &self.edit_buf[..self.edit_cursor];
-                let after = &self.edit_buf[self.edit_cursor..];
+                let cursor = floor_char_boundary(&self.edit_buf, self.edit_cursor);
+                let before = &self.edit_buf[..cursor];
+                let after = &self.edit_buf[cursor..];
                 let cursor_str = format!("{}▏{}", before, after);
                 let spans = vec![
                     Span::styled("  ", theme.dim),                    // pin prefix
@@ -700,8 +713,9 @@ impl NoteView {
             let title_text = if is_private && !self.revealed.contains(&note.id) {
                 mask_private(&note.title, col_title_w as usize)
             } else if self.editing && is_selected && self.column == Column::Title {
-                let before = &self.edit_buf[..self.edit_cursor];
-                let after = &self.edit_buf[self.edit_cursor..];
+                let cursor = floor_char_boundary(&self.edit_buf, self.edit_cursor);
+                let before = &self.edit_buf[..cursor];
+                let after = &self.edit_buf[cursor..];
                 format!("{}|{}", before, after)
             } else {
                 truncate(&note.title, col_title_w as usize)
@@ -709,8 +723,9 @@ impl NoteView {
 
             // Tags
             let tags_text = if self.editing && is_selected && self.column == Column::Tags {
-                let before = &self.edit_buf[..self.edit_cursor];
-                let after = &self.edit_buf[self.edit_cursor..];
+                let cursor = floor_char_boundary(&self.edit_buf, self.edit_cursor);
+                let before = &self.edit_buf[..cursor];
+                let after = &self.edit_buf[cursor..];
                 format!("{}|{}", before, after)
             } else {
                 String::new() // placeholder, we use annotated spans below

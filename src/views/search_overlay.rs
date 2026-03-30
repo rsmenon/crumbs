@@ -383,7 +383,7 @@ impl SearchOverlay {
 
         let cursor_style = Style::default()
             .add_modifier(Modifier::REVERSED)
-            .fg(ratatui::style::Color::Rgb(0xeb, 0xdb, 0xb2));
+            .fg(theme.cursor);
 
         let line = Line::from(vec![
             Span::styled(prefix, theme.accent),

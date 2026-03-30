@@ -114,6 +114,10 @@ pub struct Theme {
     pub status_blocked: Style,
     pub status_done: Style,
     pub status_archived: Style,
+
+    // ── Cursor ────────────────────────────────────────────────────
+    /// Cursor / caret color (Gruvbox light0 fg0).
+    pub cursor: Color,
 }
 
 impl Theme {
@@ -181,6 +185,8 @@ impl Theme {
                 .fg(GREEN)
                 .add_modifier(Modifier::CROSSED_OUT),
             status_archived: Style::default().fg(FG_DIM),
+
+            cursor: FG0,
         }
     }
 

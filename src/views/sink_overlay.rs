@@ -340,7 +340,9 @@ impl SinkOverlay {
                     archived: false,
                     metadata: Default::default(),
                 };
-                let _ = self.store.save_person(&person);
+                if let Err(e) = self.store.save_person(&person) {
+                    return Some(AppMessage::Error(format!("Failed to save person: {e}")));
+                }
             }
         }
         for slug in &parsed.tags {
@@ -349,7 +351,9 @@ impl SinkOverlay {
                     slug: slug.clone(),
                     created_at: now,
                 };
-                let _ = self.store.save_tag(&tag);
+                if let Err(e) = self.store.save_tag(&tag) {
+                    return Some(AppMessage::Error(format!("Failed to save tag: {e}")));
+                }
             }
         }
 
@@ -638,7 +642,7 @@ impl SinkOverlay {
 
         let cursor_style = Style::default()
             .add_modifier(Modifier::REVERSED)
-            .fg(ratatui::style::Color::Rgb(0xeb, 0xdb, 0xb2));
+            .fg(theme.cursor);
 
         let line = Line::from(vec![
             Span::styled(prefix, theme.accent),

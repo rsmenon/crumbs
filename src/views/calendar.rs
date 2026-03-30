@@ -139,6 +139,12 @@ pub struct CalendarView {
     /// Index of day item awaiting delete confirmation.
     confirm_delete: Option<usize>,
 
+    // ── Task creation prompt ──────────────────────────────────────
+    /// True while the inline "new task title" prompt is active.
+    creating_task: bool,
+    new_task_buf: String,
+    new_task_cursor: usize,
+
     // ── Detail pane ───────────────────────────────────────────────
     /// The fully loaded entity shown in the detail pane.
     detail_entity: Option<LoadedEntity>,
@@ -183,6 +189,9 @@ impl CalendarView {
             content_height: 24,
             tag_filter: None,
             confirm_delete: None,
+            creating_task: false,
+            new_task_buf: String::new(),
+            new_task_cursor: 0,
             detail_entity: None,
             detail_field_cursor: 0,
             detail_mode: DetailMode::Normal,
@@ -447,16 +456,6 @@ impl CalendarView {
             _ => {}
         }
         None
-    }
-
-    fn create_task_on_selected_date(&self) -> Option<AppMessage> {
-        let mut task = Task::default();
-        task.due_date = Some(self.selected_date);
-        task.title = String::from("New task");
-        if let Err(e) = self.store.save_task(&task) {
-            return Some(AppMessage::Error(format!("Failed to create task: {}", e)));
-        }
-        Some(AppMessage::OpenTaskEditor(task.id))
     }
 
     // ── Detail pane helpers ───────────────────────────────────────
@@ -1021,6 +1020,10 @@ impl View for CalendarView {
             return None;
         };
 
+        if self.creating_task {
+            return self.handle_creating_task_key(*code);
+        }
+
         if self.confirm_delete.is_some() {
             return self.handle_confirm_delete_key(*code);
         }
@@ -1082,11 +1085,16 @@ impl View for CalendarView {
         if let Some(confirm_area) = confirm_area {
             self.draw_confirm_bar(frame, confirm_area, theme);
         }
+
+        if self.creating_task {
+            self.draw_creating_task_prompt(frame, main_area, theme);
+        }
     }
 
     fn captures_input(&self) -> bool {
         self.confirm_delete.is_some()
             || self.detail_mode != DetailMode::Normal
+            || self.creating_task
     }
 }
 
@@ -1141,9 +1149,87 @@ impl CalendarView {
                 if day > 0 {
                     if let Some(date) = NaiveDate::from_ymd_opt(self.year, self.month, day as u32) {
                         self.selected_date = date;
-                        return self.create_task_on_selected_date();
+                        self.creating_task = true;
+                        self.new_task_buf.clear();
+                        self.new_task_cursor = 0;
                     }
                 }
+                None
+            }
+            _ => None,
+        }
+    }
+
+    fn handle_creating_task_key(&mut self, code: KeyCode) -> Option<AppMessage> {
+        match code {
+            KeyCode::Esc => {
+                self.creating_task = false;
+                self.new_task_buf.clear();
+                self.new_task_cursor = 0;
+                None
+            }
+            KeyCode::Enter => {
+                self.creating_task = false;
+                let title = if self.new_task_buf.trim().is_empty() {
+                    "New task".to_string()
+                } else {
+                    self.new_task_buf.trim().to_string()
+                };
+                self.new_task_buf.clear();
+                self.new_task_cursor = 0;
+                let mut task = Task::default();
+                task.due_date = Some(self.selected_date);
+                task.title = title;
+                if let Err(e) = self.store.save_task(&task) {
+                    return Some(AppMessage::Error(format!("Failed to create task: {}", e)));
+                }
+                let id = task.id.clone();
+                self.load_day_items();
+                self.refresh_event_counts();
+                Some(AppMessage::OpenTaskEditor(id))
+            }
+            KeyCode::Backspace => {
+                if self.new_task_cursor > 0 {
+                    let mut prev = self.new_task_cursor - 1;
+                    while prev > 0 && !self.new_task_buf.is_char_boundary(prev) {
+                        prev -= 1;
+                    }
+                    self.new_task_buf.drain(prev..self.new_task_cursor);
+                    self.new_task_cursor = prev;
+                }
+                None
+            }
+            KeyCode::Left => {
+                if self.new_task_cursor > 0 {
+                    let mut prev = self.new_task_cursor - 1;
+                    while prev > 0 && !self.new_task_buf.is_char_boundary(prev) {
+                        prev -= 1;
+                    }
+                    self.new_task_cursor = prev;
+                }
+                None
+            }
+            KeyCode::Right => {
+                if self.new_task_cursor < self.new_task_buf.len() {
+                    let mut next = self.new_task_cursor + 1;
+                    while next < self.new_task_buf.len() && !self.new_task_buf.is_char_boundary(next) {
+                        next += 1;
+                    }
+                    self.new_task_cursor = next;
+                }
+                None
+            }
+            KeyCode::Home => {
+                self.new_task_cursor = 0;
+                None
+            }
+            KeyCode::End => {
+                self.new_task_cursor = self.new_task_buf.len();
+                None
+            }
+            KeyCode::Char(c) => {
+                self.new_task_buf.insert(self.new_task_cursor, c);
+                self.new_task_cursor += c.len_utf8();
                 None
             }
             _ => None,
@@ -1210,7 +1296,12 @@ impl CalendarView {
                 }
                 None
             }
-            KeyCode::Char('n') => self.create_task_on_selected_date(),
+            KeyCode::Char('n') => {
+                self.creating_task = true;
+                self.new_task_buf.clear();
+                self.new_task_cursor = 0;
+                None
+            }
             KeyCode::Char('d') => {
                 if self.day_cursor < self.day_items.len() {
                     self.confirm_delete = Some(self.day_cursor);
@@ -1377,11 +1468,14 @@ impl CalendarView {
                     if let Some(item) = self.day_items.get(idx) {
                         let item_id = item.id.clone();
                         let item_kind = item.kind.clone();
-                        match item_kind {
-                            EntityKind::Task     => { let _ = self.store.delete_task(&item_id); }
-                            EntityKind::Note     => { let _ = self.store.delete_note(&item_id); }
-                            EntityKind::Agenda   => { let _ = self.store.delete_agenda(&item_id); }
-                            _ => {}
+                        let del_result = match item_kind {
+                            EntityKind::Task   => self.store.delete_task(&item_id),
+                            EntityKind::Note   => self.store.delete_note(&item_id),
+                            EntityKind::Agenda => self.store.delete_agenda(&item_id),
+                            _ => Ok(()),
+                        };
+                        if let Err(e) = del_result {
+                            return Some(AppMessage::Error(format!("Failed to delete: {e}")));
                         }
                         self.load_day_items();
                         self.refresh_event_counts();
@@ -1399,6 +1493,25 @@ impl CalendarView {
                 None
             }
         }
+    }
+
+    fn draw_creating_task_prompt(&self, frame: &mut Frame, area: Rect, theme: &Theme) {
+        // Render a one-line prompt at the bottom of the visible area.
+        let prompt_area = Rect {
+            x: area.x,
+            y: area.y + area.height.saturating_sub(1),
+            width: area.width,
+            height: 1,
+        };
+        let before = &self.new_task_buf[..self.new_task_cursor];
+        let after = &self.new_task_buf[self.new_task_cursor..];
+        let max_w = area.width.saturating_sub(20) as usize;
+        let display = truncate(&format!("{}|{}", before, after), max_w);
+        let line = Line::from(vec![
+            Span::styled(" New task title: ", theme.dim),
+            Span::styled(display, theme.column_focus),
+        ]);
+        frame.render_widget(Paragraph::new(line), prompt_area);
     }
 
     fn draw_confirm_bar(&self, frame: &mut Frame, area: Rect, theme: &Theme) {

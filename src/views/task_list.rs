@@ -3,7 +3,7 @@ use std::sync::Arc;
 
 use chrono::{Local, Utc};
 use crossterm::event::{Event, KeyCode, KeyEvent};
-use ratatui::layout::{Constraint, Direction, Layout, Rect};
+use ratatui::layout::{Alignment, Constraint, Direction, Layout, Rect};
 use ratatui::style::Modifier;
 use ratatui::text::{Line, Span};
 use ratatui::widgets::Paragraph;
@@ -317,7 +317,9 @@ impl TaskListView {
             updated.status = new_status;
             updated.updated_at = Utc::now();
 
-            let _ = self.store.save_task(&updated);
+            if let Err(e) = self.store.save_task(&updated) {
+                eprintln!("Failed to save task: {e}");
+            }
             self.reload();
         }
     }
@@ -327,7 +329,9 @@ impl TaskListView {
             let mut updated = task;
             updated.priority = updated.priority.next();
             updated.updated_at = Utc::now();
-            let _ = self.store.save_task(&updated);
+            if let Err(e) = self.store.save_task(&updated) {
+                eprintln!("Failed to save task: {e}");
+            }
             self.reload();
         }
     }
@@ -387,13 +391,17 @@ impl TaskListView {
         }
 
         task.updated_at = Utc::now();
-        let _ = self.store.save_task(&task);
+        if let Err(e) = self.store.save_task(&task) {
+            eprintln!("Failed to save task: {e}");
+        }
         self.reload();
     }
 
     fn delete_current(&mut self) {
         if let Some(task) = self.current_task().cloned() {
-            let _ = self.store.delete_task(&task.id);
+            if let Err(e) = self.store.delete_task(&task.id) {
+                eprintln!("Failed to delete task: {e}");
+            }
             self.reload();
         }
     }
@@ -751,7 +759,9 @@ impl TaskListView {
                     let mut updated = task;
                     updated.pinned = !updated.pinned;
                     updated.updated_at = chrono::Utc::now();
-                    let _ = self.store.save_task(&updated);
+                    if let Err(e) = self.store.save_task(&updated) {
+                        return Some(AppMessage::Error(format!("Failed to save task: {e}")));
+                    }
                     self.reload();
                 }
                 None
@@ -766,7 +776,9 @@ impl TaskListView {
                         updated.pinned = false;
                     }
                     updated.updated_at = chrono::Utc::now();
-                    let _ = self.store.save_task(&updated);
+                    if let Err(e) = self.store.save_task(&updated) {
+                        return Some(AppMessage::Error(format!("Failed to save task: {e}")));
+                    }
                     self.reload();
                 }
                 None
@@ -844,7 +856,9 @@ impl TaskListView {
                 }
                 task.updated_at = Utc::now();
                 let id = task.id.clone();
-                let _ = self.store.save_task(&task);
+                if let Err(e) = self.store.save_task(&task) {
+                    return Some(AppMessage::Error(format!("Failed to save task: {e}")));
+                }
                 let now_utc = Utc::now();
                 for slug in &task.refs.people {
                     if self.store.get_person(slug).is_err() {
@@ -855,7 +869,9 @@ impl TaskListView {
                             archived: false,
                             metadata: Default::default(),
                         };
-                        let _ = self.store.save_person(&person);
+                        if let Err(e) = self.store.save_person(&person) {
+                            return Some(AppMessage::Error(format!("Failed to save person: {e}")));
+                        }
                     }
                 }
                 for slug in &task.refs.tags {
@@ -864,7 +880,9 @@ impl TaskListView {
                             slug: slug.clone(),
                             created_at: now_utc,
                         };
-                        let _ = self.store.save_tag(&tag);
+                        if let Err(e) = self.store.save_tag(&tag) {
+                            return Some(AppMessage::Error(format!("Failed to save tag: {e}")));
+                        }
                     }
                 }
                 self.cancel_input();
@@ -1011,7 +1029,9 @@ impl TaskListView {
             _ => return None,
         }
         updated.updated_at = chrono::Utc::now();
-        let _ = self.store.save_task(&updated);
+        if let Err(e) = self.store.save_task(&updated) {
+            return Some(AppMessage::Error(format!("Failed to save task: {e}")));
+        }
         self.reload();
         Some(AppMessage::Reload)
     }
@@ -1171,7 +1191,8 @@ impl TaskListView {
             } else {
                 "No matching tasks."
             };
-            let p = Paragraph::new(Span::styled(msg, theme.dim));
+            let p = Paragraph::new(Span::styled(msg, theme.title))
+                .alignment(Alignment::Center);
             frame.render_widget(p, area);
             return;
         }

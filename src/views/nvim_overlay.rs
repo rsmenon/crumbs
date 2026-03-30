@@ -258,7 +258,9 @@ impl NvimOverlay {
         };
 
         if buf_written {
-            self.handle_buffer_written();
+            if let Some(msg) = self.handle_buffer_written() {
+                return Some(msg);
+            }
         }
 
         if exited {
@@ -277,18 +279,19 @@ impl NvimOverlay {
 
     /// Called when nvim signals `BufWritePost` — read the file back and
     /// update the entity body/description in the store.
-    fn handle_buffer_written(&self) {
-        match self.entity_kind {
+    fn handle_buffer_written(&self) -> Option<AppMessage> {
+        let result = match self.entity_kind {
             EntityKind::Note => self.save_note(),
             EntityKind::Task => self.save_task(),
             EntityKind::Agenda => self.save_agenda(),
-            _ => {}
-        }
+            _ => Ok(()),
+        };
+        result.err().map(|e| AppMessage::Error(format!("Save failed: {e}")))
     }
 
-    fn save_note(&self) {
-        let Ok(body) = std::fs::read_to_string(&self.file_path) else { return };
-        let Ok(mut note) = self.store.get_note(&self.entity_id) else { return };
+    fn save_note(&self) -> anyhow::Result<()> {
+        let body = std::fs::read_to_string(&self.file_path)?;
+        let mut note = self.store.get_note(&self.entity_id)?;
         note.body = body.clone();
         note.updated_at = chrono::Utc::now();
         for m in extract_mentions(&body) {
@@ -301,23 +304,26 @@ impl NvimOverlay {
                 note.refs.tags.push(t);
             }
         }
-        let _ = self.store.save_note(&note);
+        self.store.save_note(&note)?;
+        Ok(())
     }
 
-    fn save_task(&self) {
-        let Ok(body) = std::fs::read_to_string(&self.file_path) else { return };
-        let Ok(mut task) = self.store.get_task(&self.entity_id) else { return };
+    fn save_task(&self) -> anyhow::Result<()> {
+        let body = std::fs::read_to_string(&self.file_path)?;
+        let mut task = self.store.get_task(&self.entity_id)?;
         task.description = body.trim_end().to_string();
         task.updated_at = chrono::Utc::now();
-        let _ = self.store.save_task(&task);
+        self.store.save_task(&task)?;
+        Ok(())
     }
 
-    fn save_agenda(&self) {
-        let Ok(body) = std::fs::read_to_string(&self.file_path) else { return };
-        let Ok(mut agenda) = self.store.get_agenda(&self.entity_id) else { return };
+    fn save_agenda(&self) -> anyhow::Result<()> {
+        let body = std::fs::read_to_string(&self.file_path)?;
+        let mut agenda = self.store.get_agenda(&self.entity_id)?;
         agenda.body = body;
         agenda.updated_at = chrono::Utc::now();
-        let _ = self.store.save_agenda(&agenda);
+        self.store.save_agenda(&agenda)?;
+        Ok(())
     }
 
     fn cleanup(&self) {

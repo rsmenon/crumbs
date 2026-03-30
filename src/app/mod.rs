@@ -64,9 +64,10 @@ impl ActiveTab {
     pub fn status_hints(self) -> &'static [(&'static str, &'static str)] {
         match self {
             Self::Dashboard => &[
-                ("s", "sink"), ("/", "search"), ("?", "help"), ("R", "refresh"),
+                ("s", "sink"), ("/", "search"), ("?", "help"),
             ],
             Self::Tasks => &[
+                ("n", "new"), ("e", "edit"), ("d", "delete"),
                 ("Space", "status"), ("f", "filter"), ("S", "sort"),
                 ("A", "archived"),
             ],
@@ -77,6 +78,7 @@ impl ActiveTab {
                 ("Enter", "open"), ("v", "preview"),
             ],
             Self::People => &[
+                ("n", "new"), ("e", "rename"),
                 ("Tab", "focus pane"), ("Enter", "open"),
             ],
         }
@@ -369,6 +371,7 @@ impl App {
             KeyCode::Char('P') => {
                 self.active_tab = ActiveTab::People;
                 self.close_overlays();
+                self.people.on_tab_entered();
                 self.broadcast_message(&AppMessage::Reload);
             }
             KeyCode::Char('?') => {
@@ -456,7 +459,10 @@ impl App {
                         refs: crate::domain::Refs::default(),
                         body: String::new(),
                     };
-                    let _ = self.store.save_note(&note);
+                    if let Err(e) = self.store.save_note(&note) {
+                        self.error_flash = Some(format!("Failed to create note: {e}"));
+                        return None;
+                    }
                 }
                 let title = self.store.get_note(&id)
                     .map(|n| n.title.clone())
@@ -529,7 +535,7 @@ impl App {
                 match eref.kind {
                     EntityKind::Agenda => {
                         self.active_tab = ActiveTab::People;
-                        self.people.handle_message(&AppMessage::Reload);
+                        self.people.on_tab_entered();
                     }
                     EntityKind::Tag => {
                         self.active_tab = ActiveTab::Tasks;
@@ -572,7 +578,7 @@ impl App {
                     "people" => {
                         self.active_tab = ActiveTab::People;
                         self.close_overlays();
-                        self.people.handle_message(&AppMessage::Reload);
+                        self.people.on_tab_entered();
                     }
                     "search" => {
                         self.close_overlays();
@@ -793,7 +799,7 @@ impl App {
             .fg(Color::Rgb(0x68, 0x9d, 0x6a))
             .add_modifier(Modifier::BOLD);
         let ornament_style = Style::default()
-            .fg(Color::Rgb(0xeb, 0xdb, 0xb2));
+            .fg(self.theme.cursor);
         let mut spans = vec![
             Span::raw(" "),
             Span::styled("❖", ornament_style),

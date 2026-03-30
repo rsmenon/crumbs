@@ -98,8 +98,7 @@ static OVERLAYS: &[Binding] = &[
     ("f",           "Filter (tasks)"),
     ("Ctrl+T",      "Set / clear tag filter"),
     ("Ctrl+K",      "Command palette"),
-    ("Ctrl+E",      "Open external $EDITOR"),
-    ("Esc",         "Close overlay / cancel"),
+("Esc",         "Close overlay / cancel"),
 ];
 
 static SINK: &[Binding] = &[
