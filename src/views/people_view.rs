@@ -1,4 +1,4 @@
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
 use crossterm::event::{Event, KeyCode, KeyEvent};
@@ -160,6 +160,9 @@ pub struct PeopleView {
     content_height: u16,
     revealed: HashSet<String>,
 
+    // Sidebar counts: slug → (tasks, notes, agendas)
+    counts: HashMap<String, (usize, usize, usize)>,
+
     // Visibility
     show_archived: bool,
 
@@ -213,6 +216,7 @@ impl PeopleView {
             content_width: 80,
             content_height: 24,
             revealed: HashSet::new(),
+            counts: HashMap::new(),
             show_archived: false,
             tag_filter: None,
             confirm_delete: None,
@@ -270,7 +274,27 @@ impl PeopleView {
             self.left_cursor = self.people.len() - 1;
         }
 
+        self.reload_counts();
         self.reload_right_side();
+    }
+
+    fn reload_counts(&mut self) {
+        self.counts.clear();
+        for person in &self.people {
+            let refs = self.store.get_memory(&person.slug);
+            let mut tasks = 0usize;
+            let mut notes = 0usize;
+            let mut agendas = 0usize;
+            for eref in &refs {
+                match eref.kind {
+                    EntityKind::Task => tasks += 1,
+                    EntityKind::Note => notes += 1,
+                    EntityKind::Agenda => agendas += 1,
+                    _ => {}
+                }
+            }
+            self.counts.insert(person.slug.clone(), (tasks, notes, agendas));
+        }
     }
 
     fn create_person(&mut self) {
@@ -825,7 +849,7 @@ impl View for PeopleView {
         let h_chunks = Layout::default()
             .direction(Direction::Horizontal)
             .constraints([
-                Constraint::Percentage(20),
+                Constraint::Percentage(25),
                 Constraint::Min(1),
             ])
             .split(main_area);
@@ -1616,11 +1640,15 @@ impl PeopleView {
 
         let mut lines: Vec<Line> = Vec::new();
 
+        // Show per-person counts (tasks/notes/agendas) when the sidebar is wide enough.
+        // Format: `󰄱N 󰈙N 󰏪N` — 11 chars fixed width + 1 leading space = 12 reserved.
+        const COUNTS_WIDTH: u16 = 12;
+        const MIN_WIDTH_FOR_COUNTS: u16 = 26;
+        let show_counts = inner.width >= MIN_WIDTH_FOR_COUNTS;
+
         for (i, person) in self.people.iter().enumerate().skip(scroll).take(visible_rows) {
             let is_selected = i == self.left_cursor;
             let display = self.person_display(person);
-            let max_name_w = inner.width.saturating_sub(3) as usize;
-            let display = truncate(&display, max_name_w);
 
             let prefix = if person.archived {
                 format!("{} ", icons::ARCHIVE)
@@ -1629,12 +1657,38 @@ impl PeopleView {
             } else {
                 "  ".to_string()
             };
+            let prefix_chars = prefix.chars().count() as u16;
             let prefix_style = if person.archived { theme.dim } else { theme.error };
             let name_style = if person.archived { theme.dim } else { theme.person };
-            let spans = vec![
-                Span::styled(prefix, prefix_style),
-                Span::styled(display, name_style),
-            ];
+
+            let spans = if show_counts {
+                let reserved = prefix_chars + COUNTS_WIDTH;
+                let name_max_w = inner.width.saturating_sub(reserved) as usize;
+                let name_str = truncate(&display, name_max_w);
+                // Pad name to fill the column so counts align vertically
+                let name_chars = name_str.chars().count();
+                let pad = name_max_w.saturating_sub(name_chars);
+                let padded = format!("{}{}", name_str, " ".repeat(pad));
+
+                let (t, n, a) = self.counts.get(&person.slug).copied().unwrap_or((0, 0, 0));
+                let counts_str = format!(" {}{:2} {}{:2} {}{:2}",
+                    icons::TASK, t.min(99),
+                    icons::NOTE, n.min(99),
+                    icons::AGENDA, a.min(99),
+                );
+                vec![
+                    Span::styled(prefix, prefix_style),
+                    Span::styled(padded, name_style),
+                    Span::styled(counts_str, theme.dim),
+                ]
+            } else {
+                let max_name_w = inner.width.saturating_sub(prefix_chars + 1) as usize;
+                let display = truncate(&display, max_name_w);
+                vec![
+                    Span::styled(prefix, prefix_style),
+                    Span::styled(display, name_style),
+                ]
+            };
 
             let mut line = Line::from(spans);
             if is_selected {
