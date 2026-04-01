@@ -1,10 +1,13 @@
 [package]
 name = "crumb"
-version = "0.2.4"
+version = "0.3.0"
 edition = "2024"
 description = "Terminal-based personal productivity system"
 
 [dependencies]
+# CLI
+clap = { version = "4", features = ["derive"] }
+
 # TUI framework
 ratatui = "0.29"
 crossterm = "0.28"

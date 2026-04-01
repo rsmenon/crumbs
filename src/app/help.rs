@@ -3,7 +3,6 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Clear, Paragraph, Wrap};
 use ratatui::Frame;
 
-use super::message::AppMessage;
 use super::theme::Theme;
 
 /// Full-screen help overlay showing keybindings as a concise reference.
@@ -38,29 +37,6 @@ impl HelpOverlay {
 
         let para = Paragraph::new(lines).wrap(Wrap { trim: false });
         frame.render_widget(para, inner);
-    }
-
-    #[allow(dead_code)]
-    pub fn handle_event(&mut self, event: &crossterm::event::Event) -> Option<AppMessage> {
-        if let crossterm::event::Event::Key(key) = event {
-            match key.code {
-                crossterm::event::KeyCode::Esc
-                | crossterm::event::KeyCode::Char('?')
-                | crossterm::event::KeyCode::Char('q') => {
-                    return Some(AppMessage::CloseOverlays);
-                }
-                _ => {}
-            }
-        }
-        None
-    }
-
-    #[allow(dead_code)]
-    pub fn handle_message(&mut self, _msg: &AppMessage) {}
-
-    #[allow(dead_code)]
-    pub fn captures_input(&self) -> bool {
-        false
     }
 }
 

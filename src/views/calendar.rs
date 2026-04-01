@@ -96,8 +96,6 @@ struct DayItem {
     time: Option<String>,
     private: bool,
     done: bool,
-    #[allow(dead_code)]
-    status: Option<TaskStatus>,
 }
 
 impl DayItem {
@@ -421,7 +419,6 @@ impl CalendarView {
                         time: t.due_time.clone(),
                         private: t.private,
                         done: t.status == TaskStatus::Done,
-                        status: Some(t.status),
                     });
                 }
             }
@@ -435,7 +432,6 @@ impl CalendarView {
                         time: None,
                         private: n.private || n.title.contains("[p]"),
                         done: false,
-                        status: None,
                     });
                 }
             }
@@ -449,7 +445,6 @@ impl CalendarView {
                         time: None,
                         private: false,
                         done: false,
-                        status: None,
                     });
                 }
             }

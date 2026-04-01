@@ -12,6 +12,7 @@ use crate::app::message::AppMessage;
 use crate::app::theme::Theme;
 use crate::domain::{Agenda, EntityKind, EntityRef, Person, TaskStatus};
 use crate::store::Store;
+use crate::util::TextInput;
 use super::{icons, mask_private, truncate, View};
 
 // ── Focus enum ──────────────────────────────────────────────────
@@ -127,7 +128,7 @@ pub struct PeopleView {
     show_meta_popup: bool,
     meta_popup_focus: MetaPopupFocus,
     meta_editing_mode: bool,
-    meta_input: String,
+    meta_input: TextInput,
     meta_cursor: usize,
     meta_field: MetaField,
     /// Ordered list of metadata keys for the selected person (for stable cursor).
@@ -135,18 +136,18 @@ pub struct PeopleView {
 
     // Two-field editing in the popup (key + value separately)
     meta_edit_in_key: bool,
-    meta_key_input: String,
+    meta_key_input: TextInput,
     // Add mode: new row at bottom of popup
     meta_add_mode: bool,
     meta_add_in_key: bool,
-    meta_add_key: String,
+    meta_add_key: TextInput,
 
     // 1:1 Agendas
     agendas: Vec<Agenda>,
     agenda_cursor: usize,
     agenda_editing: bool,
     agenda_edit_col: AgendaColumn,
-    agenda_input: String,
+    agenda_input: TextInput,
     agenda_input_cursor: usize,
     agenda_sort_column: Option<AgendaColumn>,
     agenda_sort_direction: Option<SortDirection>,
@@ -174,7 +175,7 @@ pub struct PeopleView {
 
     // Slug editing (new person creation prompt)
     slug_editing: bool,
-    slug_input: String,
+    slug_input: TextInput,
 
     // Rename slug (existing person)
     rename_editing: bool,
@@ -194,20 +195,20 @@ impl PeopleView {
             show_meta_popup: false,
             meta_popup_focus: MetaPopupFocus::Rows,
             meta_editing_mode: false,
-            meta_input: String::new(),
+            meta_input: TextInput::new(),
             meta_cursor: 0,
             meta_field: MetaField(String::new()),
             meta_keys: Vec::new(),
             meta_edit_in_key: false,
-            meta_key_input: String::new(),
+            meta_key_input: TextInput::new(),
             meta_add_mode: false,
             meta_add_in_key: true,
-            meta_add_key: String::new(),
+            meta_add_key: TextInput::new(),
             agendas: Vec::new(),
             agenda_cursor: 0,
             agenda_editing: false,
             agenda_edit_col: AgendaColumn::Date,
-            agenda_input: String::new(),
+            agenda_input: TextInput::new(),
             agenda_input_cursor: 0,
             agenda_sort_column: None,
             agenda_sort_direction: None,
@@ -221,7 +222,7 @@ impl PeopleView {
             tag_filter: None,
             confirm_delete: None,
             slug_editing: false,
-            slug_input: String::new(),
+            slug_input: TextInput::new(),
             rename_editing: false,
             rename_input: String::new(),
             rename_cursor: 0,
@@ -300,14 +301,14 @@ impl PeopleView {
     fn create_person(&mut self) {
         let default_slug = format!("person-{}", &crate::domain::new_id()[..8]);
         self.slug_editing = true;
-        self.slug_input = default_slug;
+        self.slug_input.set(default_slug);
     }
 
     fn confirm_slug_and_create(&mut self) {
         self.slug_editing = false;
 
         // Normalize: lowercase, non-alphanumeric → hyphen, trim leading/trailing hyphens
-        let raw = self.slug_input.trim().to_string();
+        let raw = self.slug_input.value().trim().to_owned();
         let normalized: String = raw
             .to_lowercase()
             .chars()
@@ -347,8 +348,8 @@ impl PeopleView {
         self.meta_editing_mode = false;
         self.meta_add_mode = true;
         self.meta_add_in_key = false; // start in value field since key is pre-filled
-        self.meta_add_key = "name".to_string();
-        self.meta_input = String::new();
+        self.meta_add_key.set("name");
+        self.meta_input.clear();
         self.editing_metadata = true;
     }
 
@@ -510,8 +511,8 @@ impl PeopleView {
         let MetaField(key) = &self.meta_field;
         let value = person.metadata.get(key).cloned().unwrap_or_default();
 
-        self.meta_key_input = key.clone();
-        self.meta_input = value;
+        self.meta_key_input.set(key.clone());
+        self.meta_input.set(value);
         self.meta_edit_in_key = false; // default: edit value, Tab to switch to key
         self.editing_metadata = true;
     }
@@ -525,8 +526,8 @@ impl PeopleView {
         };
 
         let old_key = match &self.meta_field { MetaField(k) => k.clone() };
-        let new_key = self.meta_key_input.trim().to_string();
-        let val = self.meta_input.trim().to_string();
+        let new_key = self.meta_key_input.value().trim().to_owned();
+        let val = self.meta_input.value().trim().to_owned();
 
         // Remove old key regardless of rename
         person.metadata.remove(&old_key);
@@ -609,8 +610,8 @@ impl PeopleView {
     fn add_meta_field(&mut self) {
         self.meta_add_mode = true;
         self.meta_add_in_key = true;
-        self.meta_add_key = String::new();
-        self.meta_input = String::new();
+        self.meta_add_key.clear();
+        self.meta_input.clear();
         self.editing_metadata = true;
     }
 
@@ -618,8 +619,8 @@ impl PeopleView {
         self.meta_add_mode = false;
         self.editing_metadata = false;
 
-        let key = self.meta_add_key.trim().to_string();
-        let val = self.meta_input.trim().to_string();
+        let key = self.meta_add_key.value().trim().to_owned();
+        let val = self.meta_input.value().trim().to_owned();
 
         self.meta_add_key.clear();
         self.meta_input.clear();
@@ -685,7 +686,7 @@ impl PeopleView {
     fn start_agenda_edit(&mut self) {
         let Some(agenda) = self.agendas.get(self.agenda_cursor) else { return; };
         self.agenda_editing = true;
-        self.agenda_input = match self.agenda_edit_col {
+        let val = match self.agenda_edit_col {
             AgendaColumn::Date  => agenda.date.format("%Y-%m-%d").to_string(),
             AgendaColumn::Title => agenda.title.clone(),
             AgendaColumn::Tags  => agenda.refs.tags.iter()
@@ -693,7 +694,8 @@ impl PeopleView {
                 .collect::<Vec<_>>()
                 .join(" "),
         };
-        self.agenda_input_cursor = self.agenda_input.len();
+        self.agenda_input_cursor = val.len();
+        self.agenda_input.set(val);
     }
 
     fn save_agenda_edit(&mut self) {
@@ -705,19 +707,19 @@ impl PeopleView {
 
         match self.agenda_edit_col {
             AgendaColumn::Date => {
-                let trimmed = self.agenda_input.trim();
+                let trimmed = self.agenda_input.value().trim();
                 if let Ok(parsed_date) = chrono::NaiveDate::parse_from_str(trimmed, "%Y-%m-%d") {
                     agenda.date = parsed_date;
                 }
             }
             AgendaColumn::Title => {
-                let trimmed = self.agenda_input.trim().to_string();
+                let trimmed = self.agenda_input.value().trim().to_owned();
                 if !trimmed.is_empty() {
                     agenda.title = trimmed;
                 }
             }
             AgendaColumn::Tags => {
-                agenda.refs.tags = self.agenda_input.split_whitespace()
+                agenda.refs.tags = self.agenda_input.value().split_whitespace()
                     .map(|s| s.trim_start_matches('#').to_lowercase())
                     .filter(|s| !s.is_empty())
                     .collect();
@@ -1271,7 +1273,7 @@ impl PeopleView {
         frame.render_widget(block, popup_rect);
 
         let max_w = inner.width.saturating_sub(6) as usize;
-        let input_display = format!("@{}|", self.slug_input);
+        let input_display = format!("@{}|", self.slug_input.value());
         let input_display = truncate(&input_display, max_w);
 
         let lines = vec![
@@ -1757,7 +1759,7 @@ impl PeopleView {
 
                 // Key display: show text cursor when actively editing the key field
                 let key_display = if is_editing {
-                    let s = format!("{}{}", self.meta_key_input,
+                    let s = format!("{}{}", self.meta_key_input.value(),
                         if self.meta_edit_in_key { "|" } else { "" });
                     format!("{:<width$}", truncate(&s, max_key_w), width = max_key_w)
                 } else {
@@ -1766,7 +1768,7 @@ impl PeopleView {
 
                 // Value display: show text cursor when actively editing the value field
                 let val_display = if is_editing {
-                    let s = format!("{}{}", self.meta_input,
+                    let s = format!("{}{}", self.meta_input.value(),
                         if !self.meta_edit_in_key { "|" } else { "" });
                     truncate(&s, max_val_w)
                 } else if value.is_empty() {
@@ -1802,9 +1804,9 @@ impl PeopleView {
 
             // New-field row (shown when Add mode is active)
             if self.meta_add_mode {
-                let key_text = format!("{}{}", self.meta_add_key,
+                let key_text = format!("{}{}", self.meta_add_key.value(),
                     if self.meta_add_in_key { "|" } else { "" });
-                let val_text = format!("{}{}", self.meta_input,
+                let val_text = format!("{}{}", self.meta_input.value(),
                     if !self.meta_add_in_key { "|" } else { "" });
 
                 let key_str = format!("{:<width$}", truncate(&key_text, max_key_w), width = max_key_w);
@@ -1953,13 +1955,13 @@ impl PeopleView {
                 let is_editing = is_selected && self.agenda_editing;
 
                 let date_text = if is_editing && self.agenda_edit_col == AgendaColumn::Date {
-                    format!("{:<width$}", format!("{}|", self.agenda_input), width = date_w)
+                    format!("{:<width$}", format!("{}|", self.agenda_input.value()), width = date_w)
                 } else {
                     format!("{:<width$}", format_short_date(&agenda.date.format("%Y-%m-%d").to_string()), width = date_w)
                 };
 
                 let title_text = if is_editing && self.agenda_edit_col == AgendaColumn::Title {
-                    format!("{:<width$}", truncate(&format!("{}|", self.agenda_input), title_w), width = title_w)
+                    format!("{:<width$}", truncate(&format!("{}|", self.agenda_input.value()), title_w), width = title_w)
                 } else {
                     format!("{:<width$}", truncate(&agenda.title, title_w), width = title_w)
                 };
@@ -1969,7 +1971,7 @@ impl PeopleView {
                     .collect::<Vec<_>>()
                     .join(" ");
                 let tags_text = if is_editing && self.agenda_edit_col == AgendaColumn::Tags {
-                    truncate(&format!("{}|", self.agenda_input), tags_w)
+                    truncate(&format!("{}|", self.agenda_input.value()), tags_w)
                 } else {
                     truncate(&tags_str, tags_w)
                 };

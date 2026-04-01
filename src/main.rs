@@ -1,4 +1,5 @@
 mod app;
+mod cli;
 mod config;
 mod domain;
 mod parser;
@@ -11,6 +12,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::Result;
+use clap::Parser;
 use crossterm::{
     event::{self, DisableMouseCapture, EnableMouseCapture},
     execute,
@@ -19,23 +21,39 @@ use crossterm::{
 use ratatui::{backend::CrosstermBackend, Terminal};
 
 use app::App;
+use config::Config;
 use store::SqliteStore;
 
 fn main() -> Result<()> {
-    // Parse CLI args
-    let mut tag_filter: Option<String> = None;
-    for arg in std::env::args().skip(1) {
-        if let Some(tag) = arg.strip_prefix("--tag=") {
-            tag_filter = Some(tag.to_string());
-        }
-    }
+    let cli = cli::Cli::parse();
 
     let cfg = config::load()?;
-    let db_path = cfg.data_dir.join("crumbs.db");
+    let db_name = cli.vault.as_deref()
+        .map(|v| format!("{}.db", v))
+        .unwrap_or_else(|| "crumbs.db".to_string());
+    let db_path = cfg.data_dir.join(&db_name);
     // Ensure data dir exists
     std::fs::create_dir_all(&cfg.data_dir)?;
-    let store = Arc::new(SqliteStore::new(&db_path)?);
+    let store: Arc<dyn store::Store + Send + Sync> = Arc::new(SqliteStore::new(&db_path)?);
 
+    match cli.command {
+        None => run_tui(cfg, store, None),
+        Some(cli::Command::Tui { tag }) => run_tui(cfg, store, tag),
+        Some(cmd) => {
+            if let Err(e) = cli::execute(cmd, store) {
+                cli::output::print_error(&e.to_string());
+                std::process::exit(1);
+            }
+            Ok(())
+        }
+    }
+}
+
+fn run_tui(
+    cfg: Config,
+    store: Arc<dyn store::Store + Send + Sync>,
+    tag_filter: Option<String>,
+) -> Result<()> {
     // Terminal setup
     enable_raw_mode()?;
     let mut stdout = io::stdout();

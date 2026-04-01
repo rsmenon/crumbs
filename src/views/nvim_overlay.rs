@@ -48,8 +48,6 @@ pub struct NvimOverlay {
 
     entity_id: String,
     pub entity_kind: EntityKind,
-    #[allow(dead_code)]
-    pub title: String,
 
     /// Absolute path of the file open in nvim.
     file_path: PathBuf,
@@ -57,8 +55,6 @@ pub struct NvimOverlay {
     is_temp_file: bool,
 
     store: Arc<dyn Store>,
-    #[allow(dead_code)]
-    data_dir: PathBuf,
 
     /// Cached entity data for the metadata header display.
     metadata: MetadataSnapshot,
@@ -75,7 +71,7 @@ impl NvimOverlay {
     pub fn new(
         entity_id: String,
         entity_kind: EntityKind,
-        title: String,
+        _title: String,
         store: Arc<dyn Store>,
         data_dir: PathBuf,
         width: u16,
@@ -97,11 +93,9 @@ impl NvimOverlay {
             bridge,
             entity_id,
             entity_kind,
-            title,
             file_path,
             is_temp_file,
             store,
-            data_dir,
             metadata,
             header_height,
         })

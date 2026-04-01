@@ -1,3 +1,5 @@
+use std::collections::HashSet;
+
 use once_cell::sync::Lazy;
 use regex::Regex;
 
@@ -14,14 +16,15 @@ static MENTION_RE: Lazy<Regex> = Lazy::new(|| {
 ///
 /// Results are deduplicated while preserving first-seen order.
 pub fn extract_mentions(text: &str) -> Vec<String> {
-    let mut seen = Vec::new();
+    let mut seen = HashSet::new();
+    let mut result = Vec::new();
     for cap in MENTION_RE.captures_iter(text) {
         let slug = cap[1].to_lowercase();
-        if !seen.contains(&slug) {
-            seen.push(slug);
+        if seen.insert(slug.clone()) {
+            result.push(slug);
         }
     }
-    seen
+    result
 }
 
 #[cfg(test)]

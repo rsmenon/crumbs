@@ -131,7 +131,8 @@ pub struct App {
     pub store: Arc<dyn Store>,
     pub data_dir: PathBuf,
 
-    // Async message channel
+    // Async message channel — sender is kept alive to prevent the channel
+    // from closing; removing it would cause msg_rx.try_recv() to disconnect.
     #[allow(dead_code)]
     pub msg_tx: mpsc::Sender<AppMessage>,
     pub msg_rx: mpsc::Receiver<AppMessage>,
@@ -144,7 +145,7 @@ pub struct App {
     pub tag_filter: Option<String>,
     /// True when the tag filter input prompt is active.
     pub tag_filter_input: bool,
-    pub tag_filter_buf: String,
+    pub tag_filter_buf: crate::util::TextInput,
 }
 
 impl App {
@@ -152,7 +153,6 @@ impl App {
         let (msg_tx, msg_rx) = mpsc::channel();
         let theme = Theme::gruvbox_dark();
         let data_dir = cfg.data_dir.clone();
-        let store_clone = store.clone();
 
         Self {
             active_tab: ActiveTab::Dashboard,
@@ -160,14 +160,14 @@ impl App {
             height: 0,
             theme,
 
-            dashboard: Dashboard::new(store.clone()),
-            tasks_tab: TasksTab::new(store.clone()),
-            calendar: CalendarView::new(store.clone()),
-            notes: NoteView::new(store.clone()),
-            people: PeopleView::new(store.clone()),
+            dashboard: Dashboard::new(Arc::clone(&store)),
+            tasks_tab: TasksTab::new(Arc::clone(&store)),
+            calendar: CalendarView::new(Arc::clone(&store)),
+            notes: NoteView::new(Arc::clone(&store)),
+            people: PeopleView::new(Arc::clone(&store)),
 
-            sink: SinkOverlay::new(store.clone()),
-            search: SearchOverlay::new(store.clone()),
+            sink: SinkOverlay::new(Arc::clone(&store)),
+            search: SearchOverlay::new(Arc::clone(&store)),
             palette: CommandPalette::new(),
             help: HelpOverlay::new(),
 
@@ -182,7 +182,7 @@ impl App {
             show_date_picker: false,
             date_picker_context: None,
 
-            store: store_clone,
+            store,
             data_dir,
 
             msg_tx,
@@ -193,7 +193,7 @@ impl App {
 
             tag_filter,
             tag_filter_input: false,
-            tag_filter_buf: String::new(),
+            tag_filter_buf: crate::util::TextInput::new(),
         }
     }
 
@@ -251,7 +251,7 @@ impl App {
         if self.tag_filter_input {
             match key.code {
                 KeyCode::Enter => {
-                    let buf = self.tag_filter_buf.trim().to_string();
+                    let buf = self.tag_filter_buf.value().trim().to_owned();
                     self.tag_filter_input = false;
                     if buf.is_empty() {
                         self.set_tag_filter(None);
@@ -429,10 +429,6 @@ impl App {
                 self.show_palette = false;
                 None
             }
-            AppMessage::CloseOverlays => {
-                self.close_overlays();
-                None
-            }
             AppMessage::Error(msg) => {
                 self.error_flash = Some(msg);
                 self.error_clear_at = Some(
@@ -548,7 +544,7 @@ impl App {
             AppMessage::PaletteAction(ref action) if action == "filter-tag" => {
                 self.show_palette = false;
                 self.tag_filter_input = true;
-                self.tag_filter_buf = self.tag_filter.as_deref().unwrap_or("").to_string();
+                self.tag_filter_buf.set(self.tag_filter.as_deref().unwrap_or(""));
                 None
             }
             AppMessage::PaletteAction(ref action) => {
@@ -742,7 +738,7 @@ impl App {
             id,
             kind,
             title,
-            self.store.clone(),
+            Arc::clone(&self.store),
             self.data_dir.clone(),
             w,
             content_h,
@@ -890,7 +886,7 @@ impl App {
         if self.tag_filter_input {
             let line = Line::from(vec![
                 Span::styled(" Filter by tag: ", self.theme.accent),
-                Span::styled(&self.tag_filter_buf, self.theme.title),
+                Span::styled(self.tag_filter_buf.value(), self.theme.title),
                 Span::styled("_", self.theme.accent),
             ]);
             frame.render_widget(ratatui::widgets::Paragraph::new(line), area);

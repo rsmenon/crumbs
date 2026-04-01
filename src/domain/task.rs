@@ -42,6 +42,20 @@ impl Priority {
     }
 }
 
+impl std::str::FromStr for Priority {
+    type Err = String;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s.to_lowercase().trim() {
+            "" | "none" => Ok(Priority::None),
+            "low" => Ok(Priority::Low),
+            "medium" | "med" => Ok(Priority::Medium),
+            "high" => Ok(Priority::High),
+            other => Err(format!("unknown priority: {other}")),
+        }
+    }
+}
+
 impl Serialize for Priority {
     fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
         serializer.serialize_str(self.label())
@@ -98,16 +112,6 @@ impl TaskStatus {
         match Self::ORDER.iter().position(|s| s == self) {
             Some(idx) => Self::ORDER[(idx + 1) % Self::ORDER.len()],
             None => Self::ORDER[0], // Archived → Backlog
-        }
-    }
-
-    /// Cycle to the previous status (wraps around).
-    /// Archived status cycles to Done (end of ORDER).
-    #[allow(dead_code)]
-    pub fn prev(&self) -> TaskStatus {
-        match Self::ORDER.iter().position(|s| s == self) {
-            Some(idx) => Self::ORDER[(idx + Self::ORDER.len() - 1) % Self::ORDER.len()],
-            None => Self::ORDER[Self::ORDER.len() - 1], // Archived → Done
         }
     }
 

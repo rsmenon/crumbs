@@ -20,10 +20,6 @@ pub enum DatePickerContext {
 /// private to the view and never appear here.
 #[derive(Debug, Clone)]
 pub enum AppMessage {
-    // ── Navigation ────────────────────────────────────────────────
-    /// Close every open overlay.
-    CloseOverlays,
-
     // ── Data lifecycle ────────────────────────────────────────────
     /// Ask every view to reload its data from the store.
     Reload,

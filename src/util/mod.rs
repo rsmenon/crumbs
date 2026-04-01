@@ -1,5 +1,8 @@
 pub mod calendar;
 pub mod date_format;
+pub mod text_input;
+
+pub use text_input::TextInput;
 
 /// Move the byte-offset cursor one character backward in a UTF-8 string.
 pub fn cursor_prev(s: &str, pos: usize) -> usize {
