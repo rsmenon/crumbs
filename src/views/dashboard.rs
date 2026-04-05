@@ -526,7 +526,7 @@ impl Dashboard {
         };
 
         let border_style = if is_focused {
-            theme.subtitle
+            theme.accent
         } else {
             theme.border
         };

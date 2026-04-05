@@ -10,7 +10,7 @@ use ratatui::Frame;
 
 use crate::app::message::AppMessage;
 use crate::app::theme::Theme;
-use crate::domain::{Note, Refs};
+use crate::domain::{EntityKind, Note, Refs};
 use super::{detect_private, floor_char_boundary, icons, mask_private, truncate, View};
 use crate::store::Store;
 
@@ -21,6 +21,7 @@ enum Column {
     Title,
     Tags,
     Modified,
+    Refs,
 }
 
 impl Column {
@@ -28,15 +29,17 @@ impl Column {
         match self {
             Column::Title => Column::Tags,
             Column::Tags => Column::Modified,
-            Column::Modified => Column::Title,
+            Column::Modified => Column::Refs,
+            Column::Refs => Column::Title,
         }
     }
 
     fn prev(self) -> Self {
         match self {
-            Column::Title => Column::Modified,
+            Column::Title => Column::Refs,
             Column::Tags => Column::Title,
             Column::Modified => Column::Tags,
+            Column::Refs => Column::Modified,
         }
     }
 }
@@ -164,11 +167,23 @@ impl NoteView {
                     flip(b.updated_at.cmp(&a.updated_at))
                 });
             }
+            Column::Refs => {
+                self.notes.sort_by(|a, b| {
+                    let ca = a.refs.tasks.len() + a.refs.notes.len() + a.refs.agendas.len();
+                    let cb = b.refs.tasks.len() + b.refs.notes.len() + b.refs.agendas.len();
+                    flip(ca.cmp(&cb))
+                });
+            }
         }
     }
 
     fn current_note(&self) -> Option<&Note> {
         self.notes.get(self.cursor)
+    }
+
+    /// Return the ID of the currently focused note, if any.
+    pub fn focused_entity_id(&self) -> Option<String> {
+        self.notes.get(self.cursor).map(|n| n.id.clone())
     }
 
     // ── Editing ──────────────────────────────────────────────────
@@ -190,6 +205,10 @@ impl NoteView {
                 Column::Modified => {
                     // Modified is read-only; show current value but don't allow editing
                     note.updated_at.format("%Y-%m-%d %H:%M").to_string()
+                }
+                Column::Refs => {
+                    // Refs is read-only
+                    String::new()
                 }
             }
         };
@@ -225,8 +244,8 @@ impl NoteView {
                 note.refs.people = people;
                 note.refs.tags = topics;
             }
-            Column::Modified => {
-                // Modified is read-only; ignore edits
+            Column::Modified | Column::Refs => {
+                // Read-only columns; ignore edits
                 self.edit_buf.clear();
                 return;
             }
@@ -272,16 +291,6 @@ impl NoteView {
 
     // ── Annotation rendering ─────────────────────────────────────
 
-    fn annotated_tags<'a>(note: &Note, theme: &'a Theme) -> Vec<Span<'a>> {
-        let mut spans = Vec::new();
-        for t in &note.refs.tags {
-            if !spans.is_empty() {
-                spans.push(Span::raw(" "));
-            }
-            spans.push(Span::styled(format!("#{}", t), theme.topic));
-        }
-        spans
-    }
 }
 
 // ── View trait ────────────────────────────────────────────────────
@@ -414,12 +423,39 @@ impl NoteView {
                 None
             }
             KeyCode::Char('e') => {
+                if self.column == Column::Refs {
+                    // On the Refs column, 'e' opens the link overlay (same as Enter on Refs)
+                    if let Some(note) = self.current_note() {
+                        let note_id = note.id.clone();
+                        let is_private = note.private;
+                        if is_private && !self.revealed.contains(&note_id) {
+                            return None;
+                        }
+                        return Some(AppMessage::OpenLinkOverlay {
+                            source_kind: EntityKind::Note,
+                            source_id: note_id,
+                        });
+                    }
+                    return None;
+                }
                 self.start_edit();
                 None
             }
             KeyCode::Enter => {
                 if let Some(note) = self.current_note() {
                     let note_id = note.id.clone();
+                    if self.column == Column::Refs {
+                        // Guard: don't open link overlay on unrevealed private notes
+                        if note.private && !self.revealed.contains(&note_id) {
+                            // Toggle reveal instead
+                            self.revealed.insert(note_id);
+                            return None;
+                        }
+                        return Some(AppMessage::OpenLinkOverlay {
+                            source_kind: EntityKind::Note,
+                            source_id: note_id,
+                        });
+                    }
                     let note_private = note.private;
                     if note_private {
                         if self.revealed.contains(&note_id) {
@@ -500,6 +536,16 @@ impl NoteView {
             KeyCode::Char('A') => {
                 self.show_archived = !self.show_archived;
                 self.reload();
+                None
+            }
+            KeyCode::Char('x') => {
+                if let Some(note) = self.notes.get(self.cursor) {
+                    return Some(AppMessage::OpenRefExplorer {
+                        kind: EntityKind::Note,
+                        id: note.id.clone(),
+                        title: note.title.clone(),
+                    });
+                }
                 None
             }
             _ => None,
@@ -630,11 +676,12 @@ impl NoteView {
     // ── Drawing ──────────────────────────────────────────────────
 
     fn draw_list(&self, frame: &mut Frame, area: Rect, theme: &Theme) {
-        let col_tags_w: u16 = 14;
+        let col_tags_w: u16 = 21;
         let col_modified_w: u16 = 12;
+        let col_refs_w: u16 = 5;
         let col_title_w = area
             .width
-            .saturating_sub(col_tags_w + col_modified_w + 2 + 2 + 2); // +2 for body icon + 2 for pin icon
+            .saturating_sub(col_tags_w + col_modified_w + col_refs_w + 2 + 2 + 3); // +2 body icon + 2 pin icon + 3 separators
 
         // Header line — show sort arrow next to the active sort column
         let sort_arrow = |col: Column, base: &str, width: usize| -> String {
@@ -664,6 +711,11 @@ impl NoteView {
             ),
             Span::styled(
                 sort_arrow(Column::Modified, "MODIFIED", col_modified_w as usize),
+                theme.column_header,
+            ),
+            Span::styled(" ", theme.column_header),
+            Span::styled(
+                sort_arrow(Column::Refs, "REFS", col_refs_w as usize),
                 theme.column_header,
             ),
         ]);
@@ -696,6 +748,8 @@ impl NoteView {
                     ),
                     Span::styled(pad_right("", col_tags_w as usize), theme.dim),
                     Span::styled(pad_right("", col_modified_w as usize), theme.dim),
+                    Span::styled(" ", theme.dim),
+                    Span::styled(pad_right("", col_refs_w as usize), theme.dim),
                 ];
                 let line = Line::from(spans).style(theme.row_gray);
                 lines.push(line);
@@ -722,14 +776,10 @@ impl NoteView {
             };
 
             // Tags
-            let tags_text = if self.editing && is_selected && self.column == Column::Tags {
-                let cursor = floor_char_boundary(&self.edit_buf, self.edit_cursor);
-                let before = &self.edit_buf[..cursor];
-                let after = &self.edit_buf[cursor..];
-                format!("{}|{}", before, after)
-            } else {
-                String::new() // placeholder, we use annotated spans below
-            };
+            let tags_str = note.refs.tags.iter()
+                .map(|t| format!("#{}", t))
+                .collect::<Vec<_>>()
+                .join(" ");
 
             // Modified date
             let modified = crate::util::date_format::format_utc_date(&note.updated_at);
@@ -773,59 +823,47 @@ impl NoteView {
 
             // Tags span
             if self.editing && is_selected && self.column == Column::Tags {
+                let cursor = floor_char_boundary(&self.edit_buf, self.edit_cursor);
+                let before = &self.edit_buf[..cursor];
+                let after = &self.edit_buf[cursor..];
+                let edit_text = format!("{}|{}", before, after);
                 spans.push(Span::styled(
-                    pad_right(&tags_text, col_tags_w as usize),
+                    pad_right(&edit_text, col_tags_w as usize),
                     theme.column_focus,
                 ));
             } else if is_selected && self.column == Column::Tags {
-                let tag_spans = Self::annotated_tags(note, theme);
-                if tag_spans.is_empty() {
-                    spans.push(Span::styled(
-                        pad_right("", col_tags_w as usize),
-                        theme.column_focus,
-                    ));
-                } else {
-                    // Render tags with annotation + padding
-                    let mut tags_str = String::new();
-                    for t in &note.refs.tags {
-                        if !tags_str.is_empty() {
-                            tags_str.push(' ');
-                        }
-                        tags_str.push_str(&format!("#{}", t));
-                    }
-                    spans.push(Span::styled(
-                        pad_right(&truncate(&tags_str, col_tags_w as usize), col_tags_w as usize),
-                        theme.column_focus,
-                    ));
-                }
+                spans.push(Span::styled(
+                    pad_right(&truncate(&tags_str, col_tags_w as usize), col_tags_w as usize),
+                    theme.column_focus,
+                ));
             } else {
-                // Build annotated tag spans
-                let mut tag_parts: Vec<Span> = Vec::new();
-                let mut tag_len = 0usize;
-                for t in &note.refs.tags {
-                    let s = format!("#{}", t);
-                    tag_len += s.len() + 1;
-                    if !tag_parts.is_empty() {
-                        tag_parts.push(Span::raw(" "));
-                    }
-                    tag_parts.push(Span::styled(s, theme.topic));
-                }
-                // Pad remainder
-                let padding = (col_tags_w as usize).saturating_sub(tag_len);
-                if tag_parts.is_empty() {
-                    spans.push(Span::raw(pad_right("", col_tags_w as usize)));
-                } else {
-                    spans.extend(tag_parts);
-                    if padding > 0 {
-                        spans.push(Span::raw(" ".repeat(padding)));
-                    }
-                }
+                let style = if note.archived { theme.dim } else { theme.topic };
+                spans.push(Span::styled(
+                    pad_right(&truncate(&tags_str, col_tags_w as usize), col_tags_w as usize),
+                    style,
+                ));
             }
 
             // Modified span
             spans.push(Span::styled(
                 pad_right(&modified, col_modified_w as usize),
                 theme.date,
+            ));
+
+            // Refs count
+            let ref_count = note.refs.tasks.len() + note.refs.notes.len() + note.refs.agendas.len();
+            let refs_text = if ref_count > 0 { format!("󰌷{}", ref_count) } else { String::new() };
+            let refs_style = if is_selected && self.column == Column::Refs {
+                theme.column_focus
+            } else if ref_count > 0 {
+                theme.accent
+            } else {
+                theme.dim
+            };
+            spans.push(Span::styled(" ", theme.dim));
+            spans.push(Span::styled(
+                pad_right(&refs_text, col_refs_w as usize),
+                refs_style,
             ));
 
             let mut line = Line::from(spans);

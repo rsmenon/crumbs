@@ -54,6 +54,9 @@ enum DetailField {
     // shared (shown for tasks + notes)
     People,
     Dir,
+    // cross-references
+    Linked,
+    Backlinks,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -62,6 +65,8 @@ enum FieldKind {
     Select,
     DatePick,
     ReadOnly,
+    /// Continuation of a multi-line field: rendered with no glyph/label prefix.
+    Continuation,
 }
 
 struct FieldRow {
@@ -146,6 +151,10 @@ pub struct CalendarView {
     // ── Detail pane ───────────────────────────────────────────────
     /// The fully loaded entity shown in the detail pane.
     detail_entity: Option<LoadedEntity>,
+    /// Resolved outgoing link parts for the detail pane (one string per ref).
+    detail_linked: Vec<String>,
+    /// Resolved backlink parts for the detail pane (one string per ref).
+    detail_backlinks: Vec<String>,
     /// Which field row is highlighted in the detail pane.
     detail_field_cursor: usize,
     /// Whether we are editing/selecting in the detail pane.
@@ -191,6 +200,8 @@ impl CalendarView {
             new_task_buf: String::new(),
             new_task_cursor: 0,
             detail_entity: None,
+            detail_linked: Vec::new(),
+            detail_backlinks: Vec::new(),
             detail_field_cursor: 0,
             detail_mode: DetailMode::Normal,
             detail_input: String::new(),
@@ -458,20 +469,68 @@ impl CalendarView {
     /// Load the entity at `day_cursor` into the detail pane.
     fn load_detail_item(&mut self) {
         self.detail_entity = None;
+        self.detail_linked = Vec::new();
+        self.detail_backlinks = Vec::new();
         self.detail_field_cursor = 0;
         self.detail_mode = DetailMode::Normal;
         let Some(item) = self.day_items.get(self.day_cursor) else { return };
+        let kind_str = match item.kind {
+            EntityKind::Task => "task",
+            EntityKind::Note => "note",
+            EntityKind::Agenda => "agenda",
+            _ => return,
+        };
         let entity = match item.kind {
             EntityKind::Task => self.store.get_task(&item.id).ok().map(LoadedEntity::Task),
             EntityKind::Note => self.store.get_note(&item.id).ok().map(LoadedEntity::Note),
             EntityKind::Agenda => self.store.get_agenda(&item.id).ok().map(LoadedEntity::Agenda),
             _ => None,
         };
+
+        // Build linked / backlinks part lists (one entry per ref).
+        if let Some(ref e) = entity {
+            let (task_ids, note_ids, agenda_ids) = match e {
+                LoadedEntity::Task(t) => (t.refs.tasks.clone(), t.refs.notes.clone(), t.refs.agendas.clone()),
+                LoadedEntity::Note(n) => (n.refs.tasks.clone(), n.refs.notes.clone(), n.refs.agendas.clone()),
+                LoadedEntity::Agenda(a) => (a.refs.tasks.clone(), a.refs.notes.clone(), a.refs.agendas.clone()),
+            };
+            for id in &task_ids {
+                if let Ok(t) = self.store.get_task(id) {
+                    self.detail_linked.push(format!("{} {}", icons::TASK, truncate(&t.title, 20)));
+                }
+            }
+            for id in &note_ids {
+                if let Ok(n) = self.store.get_note(id) {
+                    self.detail_linked.push(format!("{} {}", icons::NOTE, truncate(&n.title, 20)));
+                }
+            }
+            for id in &agenda_ids {
+                if let Ok(a) = self.store.get_agenda(id) {
+                    self.detail_linked.push(format!("{} {}", icons::AGENDA, truncate(&a.title, 20)));
+                }
+            }
+        }
+
+        let backlink_erefs = self.store.get_backlinks(kind_str, &item.id);
+        for eref in &backlink_erefs {
+            let entry = match &eref.kind {
+                EntityKind::Task => self.store.get_task(&eref.id).ok().map(|t| (icons::TASK, t.title)),
+                EntityKind::Note => self.store.get_note(&eref.id).ok().map(|n| (icons::NOTE, n.title)),
+                EntityKind::Agenda => self.store.get_agenda(&eref.id).ok().map(|a| (icons::AGENDA, a.title)),
+                _ => None,
+            };
+            if let Some((icon, title)) = entry {
+                self.detail_backlinks.push(format!("{} {}", icon, truncate(&title, 20)));
+            }
+        }
+
         self.detail_entity = entity;
     }
 
     /// Build the list of field rows for the currently loaded entity.
-    fn detail_fields(&self) -> Vec<FieldRow> {
+    /// `value_w` is the available width for the value column; Linked/Backlinks wrap
+    /// into multiple rows when their content exceeds this width.
+    fn detail_fields(&self, value_w: usize) -> Vec<FieldRow> {
         match &self.detail_entity {
             Some(LoadedEntity::Task(t)) => {
                 let tags = t.refs.tags.iter()
@@ -496,6 +555,14 @@ impl CalendarView {
                 if !t.created_dir.is_empty() {
                     rows.push(FieldRow { field: DetailField::Dir, label: "Dir", value: t.created_dir.clone(), kind: FieldKind::ReadOnly });
                 }
+                for (i, line) in pack_into_lines(&self.detail_linked, value_w).iter().enumerate() {
+                    let (label, kind) = if i == 0 { ("Linked", FieldKind::ReadOnly) } else { ("", FieldKind::Continuation) };
+                    rows.push(FieldRow { field: DetailField::Linked, label, value: line.clone(), kind });
+                }
+                for (i, line) in pack_into_lines(&self.detail_backlinks, value_w).iter().enumerate() {
+                    let (label, kind) = if i == 0 { ("Backlinks", FieldKind::ReadOnly) } else { ("", FieldKind::Continuation) };
+                    rows.push(FieldRow { field: DetailField::Backlinks, label, value: line.clone(), kind });
+                }
                 rows
             }
             Some(LoadedEntity::Note(n)) => {
@@ -519,14 +586,31 @@ impl CalendarView {
                 if !n.created_dir.is_empty() {
                     rows.push(FieldRow { field: DetailField::Dir, label: "Dir", value: n.created_dir.clone(), kind: FieldKind::ReadOnly });
                 }
+                for (i, line) in pack_into_lines(&self.detail_linked, value_w).iter().enumerate() {
+                    let (label, kind) = if i == 0 { ("Linked", FieldKind::ReadOnly) } else { ("", FieldKind::Continuation) };
+                    rows.push(FieldRow { field: DetailField::Linked, label, value: line.clone(), kind });
+                }
+                for (i, line) in pack_into_lines(&self.detail_backlinks, value_w).iter().enumerate() {
+                    let (label, kind) = if i == 0 { ("Backlinks", FieldKind::ReadOnly) } else { ("", FieldKind::Continuation) };
+                    rows.push(FieldRow { field: DetailField::Backlinks, label, value: line.clone(), kind });
+                }
                 rows
             }
             Some(LoadedEntity::Agenda(a)) => {
-                vec![
-                    FieldRow { field: DetailField::Title,  label: "Title",  value: a.title.clone(),           kind: FieldKind::Text     },
+                let mut rows = vec![
+                    FieldRow { field: DetailField::Title,  label: "Title",  value: a.title.clone(),        kind: FieldKind::Text     },
                     FieldRow { field: DetailField::Date,   label: "Date",   value: format_date(&a.date),   kind: FieldKind::DatePick },
-                    FieldRow { field: DetailField::Person, label: "Person", value: a.person_slug.clone(),      kind: FieldKind::ReadOnly },
-                ]
+                    FieldRow { field: DetailField::Person, label: "Person", value: a.person_slug.clone(),  kind: FieldKind::ReadOnly },
+                ];
+                for (i, line) in pack_into_lines(&self.detail_linked, value_w).iter().enumerate() {
+                    let (label, kind) = if i == 0 { ("Linked", FieldKind::ReadOnly) } else { ("", FieldKind::Continuation) };
+                    rows.push(FieldRow { field: DetailField::Linked, label, value: line.clone(), kind });
+                }
+                for (i, line) in pack_into_lines(&self.detail_backlinks, value_w).iter().enumerate() {
+                    let (label, kind) = if i == 0 { ("Backlinks", FieldKind::ReadOnly) } else { ("", FieldKind::Continuation) };
+                    rows.push(FieldRow { field: DetailField::Backlinks, label, value: line.clone(), kind });
+                }
+                rows
             }
             None => vec![],
         }
@@ -567,7 +651,7 @@ impl CalendarView {
     /// Save the current field edit back to the store and refresh.
     fn save_detail_field(&mut self) -> Option<AppMessage> {
         let val = self.detail_input.trim().to_string();
-        let fields = self.detail_fields();
+        let fields = self.detail_fields(usize::MAX);
         let Some(row) = fields.get(self.detail_field_cursor) else { return None };
         let field = row.field;
 
@@ -816,7 +900,8 @@ impl CalendarView {
             return;
         }
 
-        let fields = self.detail_fields();
+        let value_w = area.width.saturating_sub(DETAIL_PREFIX_W as u16) as usize;
+        let fields = self.detail_fields(value_w);
         let n_fields = fields.len();
         let is_private = self.detail_is_private();
         let is_revealed = self.detail_entity.as_ref()
@@ -834,6 +919,20 @@ impl CalendarView {
         for (i, row) in fields.iter().enumerate() {
             let is_active = focused && i == self.detail_field_cursor;
             let is_editing = is_active && self.detail_mode == DetailMode::EditingText;
+
+            // Continuation rows: just the value indented to the value column.
+            if row.kind == FieldKind::Continuation {
+                let truncated = truncate(&row.value, value_w);
+                let mut line = Line::from(vec![
+                    Span::raw(" ".repeat(DETAIL_PREFIX_W)),
+                    Span::styled(truncated, theme.dim),
+                ]);
+                if is_active {
+                    line = line.style(theme.row_gray);
+                }
+                rows.push(line);
+                continue;
+            }
 
             let value_str: String = if is_editing {
                 let before = &self.detail_input[..self.detail_input_cursor];
@@ -863,7 +962,7 @@ impl CalendarView {
                     },
                     DetailField::Tags => theme.topic,
                     DetailField::People => theme.person,
-                    DetailField::Dir => theme.dim,
+                    DetailField::Dir | DetailField::Linked | DetailField::Backlinks => theme.dim,
                     _ => match row.kind {
                         FieldKind::ReadOnly => theme.dim,
                         FieldKind::Select | FieldKind::DatePick if is_active => theme.accent,
@@ -872,8 +971,7 @@ impl CalendarView {
                 }
             };
 
-            let w = area.width.saturating_sub(DETAIL_PREFIX_W as u16) as usize;
-            let truncated = truncate(&value_str, w);
+            let truncated = truncate(&value_str, value_w);
 
             let glyph = detail_field_glyph(row.field);
             let mut line = Line::from(vec![
@@ -993,6 +1091,37 @@ impl CalendarView {
 // ── Detail pane helpers ───────────────────────────────────────────
 
 /// Nerd Font glyph for each detail field, matching the nvim overlay header icons.
+/// Pack ref display strings into lines, each fitting within `value_w` chars.
+/// Returns an empty Vec when `parts` is empty.
+fn pack_into_lines(parts: &[String], value_w: usize) -> Vec<String> {
+    if parts.is_empty() {
+        return Vec::new();
+    }
+    if value_w == 0 {
+        // No width constraint: one line per part.
+        return parts.to_vec();
+    }
+    let mut lines: Vec<String> = Vec::new();
+    let mut current = String::new();
+    for part in parts {
+        let sep_w = if current.is_empty() { 0 } else { 2 }; // "  " separator
+        let needed = sep_w + part.chars().count();
+        if !current.is_empty() && current.chars().count() + needed > value_w {
+            lines.push(current.clone());
+            current = part.clone();
+        } else {
+            if !current.is_empty() {
+                current.push_str("  ");
+            }
+            current.push_str(part);
+        }
+    }
+    if !current.is_empty() {
+        lines.push(current);
+    }
+    lines
+}
+
 fn detail_field_glyph(field: DetailField) -> &'static str {
     match field {
         DetailField::Title    => "\u{f0219}", // 󰈙  nf-md-file_document
@@ -1004,8 +1133,10 @@ fn detail_field_glyph(field: DetailField) -> &'static str {
         DetailField::Modified => "\u{f08a7}", // 󰢧  nf-md-calendar_edit
         DetailField::People   => "\u{f0004}", // 󰀄  nf-md-account
         DetailField::Dir      => "\u{f024b}", // 󰉋  nf-md-folder
-        DetailField::Date     => "\u{f00ed}", // 󰃭  nf-md-calendar
-        DetailField::Person   => "\u{f0004}", // 󰀄  nf-md-account
+        DetailField::Date      => "\u{f00ed}", // 󰃭  nf-md-calendar
+        DetailField::Person    => "\u{f0004}", // 󰀄  nf-md-account
+        DetailField::Linked    => "\u{f0337}", // 󰍷  nf-md-link
+        DetailField::Backlinks => "\u{f17a5}", // 󱞥  nf-md-arrow_left_bottom
     }
 }
 
@@ -1090,6 +1221,35 @@ impl View for CalendarView {
         self.confirm_delete.is_some()
             || self.detail_mode != DetailMode::Normal
             || self.creating_task
+    }
+}
+
+impl CalendarView {
+    /// Return context-appropriate status bar hints based on the currently focused pane.
+    pub fn status_hints(&self) -> &'static [(&'static str, &'static str)] {
+        match self.focus {
+            CalendarFocus::Month => &[
+                ("Enter", "day panel"), ("t", "today"), ("[/]", "month"), ("n", "new task"),
+            ],
+            CalendarFocus::Day => &[
+                ("j/k", "select"), ("Enter", "open"), ("e", "edit"), ("n", "new"),
+                ("d", "delete"), ("Tab", "details"), ("Esc", "month"),
+            ],
+            CalendarFocus::Details => &[
+                ("j/k", "field"), ("Enter", "activate"),
+                ("Tab", "day list"), ("Esc", "day list"),
+            ],
+        }
+    }
+
+    /// Return the focused entity (kind, id) when the Day or Details pane is active.
+    pub fn focused_entity_id(&self) -> Option<(crate::domain::EntityKind, String)> {
+        if matches!(self.focus, CalendarFocus::Day | CalendarFocus::Details) {
+            self.day_items.get(self.day_cursor)
+                .map(|item| (item.kind.clone(), item.id.clone()))
+        } else {
+            None
+        }
     }
 }
 
@@ -1318,7 +1478,7 @@ impl CalendarView {
         }
 
         // Normal navigation
-        let fields = self.detail_fields();
+        let fields = self.detail_fields(usize::MAX);
         let n = fields.len();
 
         match code {
@@ -1382,7 +1542,7 @@ impl CalendarView {
                                 }
                             }
                         }
-                        FieldKind::ReadOnly => {}
+                        FieldKind::ReadOnly | FieldKind::Continuation => {}
                     }
                 }
                 None

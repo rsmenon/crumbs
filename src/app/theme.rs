@@ -21,7 +21,7 @@ const PURPLE: Color = Color::Rgb(0xb1, 0x62, 0x86);    // #b16286
 
 // Backgrounds
 /// Background 0 — darkest (main bg). Not set explicitly so terminal default shows through.
-const _BG0: Color = Color::Rgb(0x28, 0x28, 0x28);      // #282828
+const BG0: Color = Color::Rgb(0x28, 0x28, 0x28);       // #282828
 /// Background 1 — slightly lighter. Selected rows.
 const BG1: Color = Color::Rgb(0x3c, 0x38, 0x36);       // #3c3836
 /// Background 2 — borders and separators.
@@ -81,6 +81,8 @@ pub struct Theme {
     pub border: Style,
     /// Selected / highlighted row background.
     pub selected: Style,
+    /// Selected row inside an overlay (popup bg is BG1, so darker BG0 creates contrast).
+    pub selected_overlay: Style,
     /// Column header labels.
     pub column_header: Style,
     /// Background highlight for the focused column cell.
@@ -154,6 +156,7 @@ impl Theme {
             // Structural
             border: Style::default().fg(BG2),
             selected: Style::default().bg(BG_SELECTED).fg(FG0),
+            selected_overlay: Style::default().bg(BG0).fg(FG0),
             column_header: Style::default()
                 .fg(FG4),
             column_focus: Style::default().bg(BG_COL_FOCUS).fg(FG0),

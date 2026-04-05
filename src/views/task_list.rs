@@ -1,4 +1,4 @@
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
 use chrono::{Local, Utc};
@@ -11,7 +11,7 @@ use ratatui::Frame;
 
 use crate::app::message::AppMessage;
 use crate::app::theme::Theme;
-use crate::domain::{new_id, Priority, Task, TaskStatus};
+use crate::domain::{new_id, EntityKind, Priority, Task, TaskStatus};
 use crate::parser::{extract_mentions, extract_topics, parse_datetime};
 use crate::store::Store;
 use super::{detect_private, icons, mask_private, truncate, View};
@@ -20,9 +20,10 @@ use super::{detect_private, icons, mask_private, truncate, View};
 
 const COL_STATUS_W: u16 = 10;
 const COL_PRIORITY_W: u16 = 8;
-const COL_TAGS_W: u16 = 14;
+const COL_TAGS_W: u16 = 21;
 const COL_CREATED_W: u16 = 12;
 const COL_DUE_W: u16 = 10;
+const COL_REFS_W: u16 = 8;
 
 /// Priority levels for tasks.
 const PRIORITY_OPTIONS: &[Priority] = &Priority::OPTIONS;
@@ -40,6 +41,7 @@ enum Column {
     Tags = 3,
     Created = 4,
     Due = 5,
+    Refs = 6,
 }
 
 impl Column {
@@ -51,6 +53,7 @@ impl Column {
             3 => Column::Tags,
             4 => Column::Created,
             5 => Column::Due,
+            6 => Column::Refs,
             _ => Column::Status,
         }
     }
@@ -60,7 +63,7 @@ impl Column {
     }
 
     fn next(self) -> Self {
-        Column::from_index((self.index() + 1).min(5))
+        Column::from_index((self.index() + 1).min(6))
     }
 
     fn prev(self) -> Self {
@@ -100,6 +103,7 @@ pub struct TaskListView {
     // Data
     all: Vec<Task>,
     visible: Vec<Task>,
+    backlink_counts: HashMap<String, usize>,
 
     // Navigation
     cursor: usize,
@@ -151,6 +155,7 @@ impl TaskListView {
             store,
             all: Vec::new(),
             visible: Vec::new(),
+            backlink_counts: HashMap::new(),
             cursor: 0,
             col_cursor: Column::Title,
             mode: Mode::Normal,
@@ -179,6 +184,10 @@ impl TaskListView {
             if let Some(ref tag) = self.tag_filter {
                 tasks.retain(|t| t.refs.tags.iter().any(|tg| tg == tag));
             }
+            self.backlink_counts = tasks
+                .iter()
+                .map(|t| (t.id.clone(), self.store.get_backlinks("task", &t.id).len()))
+                .collect();
             self.all = tasks;
         }
         self.apply_filter();
@@ -300,11 +309,23 @@ impl TaskListView {
                     }
                 });
             }
+            Column::Refs => {
+                self.visible.sort_by(|a, b| {
+                    let ca = a.refs.tasks.len() + a.refs.notes.len() + a.refs.agendas.len();
+                    let cb = b.refs.tasks.len() + b.refs.notes.len() + b.refs.agendas.len();
+                    flip(ca.cmp(&cb))
+                });
+            }
         }
     }
 
     fn current_task(&self) -> Option<&Task> {
         self.visible.get(self.cursor)
+    }
+
+    /// Return the ID of the currently focused task, if any.
+    pub fn focused_entity_id(&self) -> Option<String> {
+        self.visible.get(self.cursor).map(|t| t.id.clone())
     }
 
     // ── Mutations ─────────────────────────────────────────────────
@@ -388,6 +409,9 @@ impl TaskListView {
                     _ => Priority::None,
                 };
             }
+            Column::Refs => {
+                // Read-only — links are managed via Ctrl+L overlay.
+            }
         }
 
         task.updated_at = Utc::now();
@@ -437,6 +461,10 @@ impl TaskListView {
             }
             Column::Created => crate::util::date_format::format_utc_date(&task.created_at),
             Column::Due => task.due_date.map(|d| d.format("%Y-%m-%d").to_string()).unwrap_or_default(),
+            Column::Refs => {
+                let count = task.refs.tasks.len() + task.refs.notes.len() + task.refs.agendas.len();
+                if count > 0 { count.to_string() } else { String::new() }
+            }
         }
     }
 
@@ -731,6 +759,12 @@ impl TaskListView {
                                 ),
                             });
                         }
+                        Column::Refs => {
+                            return Some(AppMessage::OpenLinkOverlay {
+                                source_kind: crate::domain::EntityKind::Task,
+                                source_id: task.id.clone(),
+                            });
+                        }
                         _ => {
                             return Some(AppMessage::OpenTaskEditor(task.id.clone()));
                         }
@@ -821,6 +855,18 @@ impl TaskListView {
                 if !self.filter_str.is_empty() {
                     self.filter_str.clear();
                     self.apply_filter();
+                }
+                None
+            }
+
+            // Open ref explorer
+            KeyCode::Char('x') => {
+                if let Some(task) = self.visible.get(self.cursor) {
+                    return Some(AppMessage::OpenRefExplorer {
+                        kind: EntityKind::Task,
+                        id: task.id.clone(),
+                        title: task.title.clone(),
+                    });
                 }
                 None
             }
@@ -1120,7 +1166,7 @@ impl TaskListView {
     fn render_header(&self, frame: &mut Frame, area: Rect, theme: &Theme) {
         let title_w = area
             .width
-            .saturating_sub(COL_STATUS_W + COL_PRIORITY_W + COL_TAGS_W + COL_CREATED_W + COL_DUE_W + 5 + 2 + 2) as usize; // 5 separators + 2 body icon + 2 pin prefix
+            .saturating_sub(COL_STATUS_W + COL_PRIORITY_W + COL_TAGS_W + COL_CREATED_W + COL_DUE_W + COL_REFS_W + 6 + 2 + 2) as usize; // 6 separators + 2 body icon + 2 pin prefix
 
         // Helper: append sort arrow to header label if this column is the active sort column
         let sort_arrow = |col: Column, base: &str, width: usize| -> String {
@@ -1169,6 +1215,11 @@ impl TaskListView {
             sort_arrow(Column::Due, "DUE", COL_DUE_W as usize),
             theme.column_header,
         ));
+        spans.push(Span::styled(" ", theme.border));
+        spans.push(Span::styled(
+            sort_arrow(Column::Refs, "REFS", COL_REFS_W as usize),
+            theme.column_header,
+        ));
 
         // Filter indicator
         if !self.filter_str.is_empty() {
@@ -1208,7 +1259,7 @@ impl TaskListView {
 
         let title_w = area
             .width
-            .saturating_sub(COL_STATUS_W + COL_PRIORITY_W + COL_TAGS_W + COL_CREATED_W + COL_DUE_W + 5 + 2 + 2) as usize; // 5 separators + 2 body icon + 2 pin prefix
+            .saturating_sub(COL_STATUS_W + COL_PRIORITY_W + COL_TAGS_W + COL_CREATED_W + COL_DUE_W + COL_REFS_W + 6 + 2 + 2) as usize; // 6 separators + 2 body icon + 2 pin prefix
 
         let today = Local::now().date_naive();
 
@@ -1224,6 +1275,7 @@ impl TaskListView {
             let empty_tags = pad_right("", COL_TAGS_W as usize);
             let empty_created = pad_right("", COL_CREATED_W as usize);
             let empty_due = pad_right("", COL_DUE_W as usize);
+            let empty_refs = pad_right("", COL_REFS_W as usize);
             let spans = vec![
                 Span::styled("  ", theme.dim),
                 Span::styled(empty_status, theme.dim),
@@ -1238,6 +1290,8 @@ impl TaskListView {
                 Span::styled(empty_created, theme.dim),
                 Span::styled(" ", theme.border),
                 Span::styled(empty_due, theme.dim),
+                Span::styled(" ", theme.border),
+                Span::styled(empty_refs, theme.dim),
             ];
             lines.push(Line::from(spans).style(theme.row_gray));
         }
@@ -1426,6 +1480,26 @@ impl TaskListView {
                 spans.push(Span::styled(due_padded, theme.column_focus));
             } else {
                 spans.push(Span::styled(due_padded, due_style));
+            }
+
+            spans.push(Span::styled(" ", theme.border));
+
+            // Refs column
+            let out_count = task.refs.tasks.len() + task.refs.notes.len() + task.refs.agendas.len();
+            let back_count = self.backlink_counts.get(&task.id).copied().unwrap_or(0);
+            let refs_text = match (out_count > 0, back_count > 0) {
+                (true, true)   => format!("󰌷{} 󱞥{}", out_count, back_count),
+                (true, false)  => format!("󰌷{}", out_count),
+                (false, true)  => format!("󱞥{}", back_count),
+                (false, false) => String::new(),
+            };
+            let refs_padded = pad_right(&refs_text, COL_REFS_W as usize);
+            let has_refs = out_count > 0 || back_count > 0;
+            let refs_style = if is_archived { theme.dim } else { theme.accent };
+            if is_selected && self.col_cursor == Column::Refs {
+                spans.push(Span::styled(refs_padded, theme.column_focus));
+            } else {
+                spans.push(Span::styled(refs_padded, if has_refs { refs_style } else { theme.dim }));
             }
 
             let mut line = Line::from(spans);

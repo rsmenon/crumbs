@@ -203,6 +203,14 @@ fn save_entity_refs(tx: &Transaction, source_kind: &str, source_id: &str, refs: 
         )?;
     }
 
+    // Insert agenda refs
+    for agenda_id in &refs.agendas {
+        tx.execute(
+            "INSERT OR IGNORE INTO entity_refs (source_kind, source_id, target_kind, target_id) VALUES (?1, ?2, 'agenda', ?3)",
+            params![source_kind, source_id, agenda_id],
+        )?;
+    }
+
     Ok(())
 }
 
@@ -230,6 +238,7 @@ fn load_refs(conn: &Connection, source_kind: &str, source_id: &str) -> Refs {
                 "tag" => refs.tags.push(id),
                 "task" => refs.tasks.push(id),
                 "note" => refs.notes.push(id),
+                "agenda" => refs.agendas.push(id),
                 _ => {}
             }
         }
@@ -422,6 +431,7 @@ impl Store for SqliteStore {
         let tx = conn.unchecked_transaction()?;
         tx.execute("DELETE FROM tasks WHERE id = ?1", params![id])?;
         tx.execute("DELETE FROM entity_refs WHERE source_kind = 'task' AND source_id = ?1", params![id])?;
+        tx.execute("DELETE FROM entity_refs WHERE target_kind = 'task' AND target_id = ?1", params![id])?;
         tx.execute("DELETE FROM fts_entities WHERE entity_id = ?1 AND entity_kind = 'task'", params![id])?;
         tx.commit()?;
         Ok(())
@@ -522,6 +532,7 @@ impl Store for SqliteStore {
         let tx = conn.unchecked_transaction()?;
         tx.execute("DELETE FROM notes WHERE id = ?1", params![id])?;
         tx.execute("DELETE FROM entity_refs WHERE source_kind = 'note' AND source_id = ?1", params![id])?;
+        tx.execute("DELETE FROM entity_refs WHERE target_kind = 'note' AND target_id = ?1", params![id])?;
         tx.execute("DELETE FROM fts_entities WHERE entity_id = ?1 AND entity_kind = 'note'", params![id])?;
         tx.commit()?;
         Ok(())
@@ -629,9 +640,13 @@ impl Store for SqliteStore {
 
     fn delete_person(&self, slug: &str) -> Result<()> {
         let conn = self.conn.lock().unwrap();
-        conn.execute("DELETE FROM persons WHERE slug = ?1", params![slug])?;
-        conn.execute("DELETE FROM entity_refs WHERE target_kind = 'person' AND target_id = ?1", params![slug])?;
-        conn.execute("DELETE FROM fts_entities WHERE entity_id = ?1 AND entity_kind = 'person'", params![slug])?;
+        let tx = conn.unchecked_transaction()?;
+        tx.execute("DELETE FROM person_metadata WHERE person_slug = ?1", params![slug])?;
+        tx.execute("DELETE FROM entity_refs WHERE source_kind = 'person' AND source_id = ?1", params![slug])?;
+        tx.execute("DELETE FROM entity_refs WHERE target_kind = 'person' AND target_id = ?1", params![slug])?;
+        tx.execute("DELETE FROM fts_entities WHERE entity_id = ?1 AND entity_kind = 'person'", params![slug])?;
+        tx.execute("DELETE FROM persons WHERE slug = ?1", params![slug])?;
+        tx.commit()?;
         Ok(())
     }
 
@@ -806,6 +821,7 @@ impl Store for SqliteStore {
         let tx = conn.unchecked_transaction()?;
         tx.execute("DELETE FROM agendas WHERE id = ?1", params![id])?;
         tx.execute("DELETE FROM entity_refs WHERE source_kind = 'agenda' AND source_id = ?1", params![id])?;
+        tx.execute("DELETE FROM entity_refs WHERE target_kind = 'agenda' AND target_id = ?1", params![id])?;
         tx.execute("DELETE FROM fts_entities WHERE entity_id = ?1 AND entity_kind = 'agenda'", params![id])?;
         tx.commit()?;
         Ok(())
@@ -970,6 +986,50 @@ impl Store for SqliteStore {
         }
 
         scores
+    }
+
+    fn add_entity_ref(&self, src_kind: &str, src_id: &str, tgt_kind: &str, tgt_id: &str) -> Result<()> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "INSERT OR IGNORE INTO entity_refs (source_kind, source_id, target_kind, target_id) VALUES (?1, ?2, ?3, ?4)",
+            params![src_kind, src_id, tgt_kind, tgt_id],
+        )?;
+        Ok(())
+    }
+
+    fn remove_entity_ref(&self, src_kind: &str, src_id: &str, tgt_kind: &str, tgt_id: &str) -> Result<()> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "DELETE FROM entity_refs WHERE source_kind = ?1 AND source_id = ?2 AND target_kind = ?3 AND target_id = ?4",
+            params![src_kind, src_id, tgt_kind, tgt_id],
+        )?;
+        Ok(())
+    }
+
+    fn get_backlinks(&self, target_kind: &str, target_id: &str) -> Vec<EntityRef> {
+        let conn = self.conn.lock().unwrap();
+        let mut results = Vec::new();
+        if let Ok(mut stmt) = conn.prepare(
+            "SELECT source_kind, source_id FROM entity_refs WHERE target_kind = ?1 AND target_id = ?2"
+        ) {
+            if let Ok(rows) = stmt.query_map(params![target_kind, target_id], |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+            }) {
+                for row in rows.flatten() {
+                    let (kind_str, id) = row;
+                    let kind = match kind_str.as_str() {
+                        "task" => EntityKind::Task,
+                        "note" => EntityKind::Note,
+                        "agenda" => EntityKind::Agenda,
+                        "person" => EntityKind::Person,
+                        "tag" => EntityKind::Tag,
+                        _ => continue,
+                    };
+                    results.push(EntityRef { kind, id });
+                }
+            }
+        }
+        results
     }
 
     fn rename_person(&self, old_slug: &str, new_slug: &str) -> Result<()> {

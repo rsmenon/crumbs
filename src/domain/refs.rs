@@ -10,6 +10,8 @@ pub struct Refs {
     pub notes: Vec<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub tasks: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub agendas: Vec<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]

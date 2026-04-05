@@ -11,6 +11,8 @@ pub mod command_palette;
 pub mod nvim_bridge;
 pub mod nvim_overlay;
 pub mod date_picker;
+pub mod link_overlay;
+pub mod ref_explorer;
 
 use crossterm::event::Event;
 use ratatui::Frame;

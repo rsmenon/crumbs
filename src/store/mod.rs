@@ -68,4 +68,16 @@ pub trait Store: Send + Sync {
     /// Returns a map of person slug → score (missing slugs score 0).
     fn person_frecency_scores(&self) -> std::collections::HashMap<String, f64>;
 
+    // ── Cross-references ─────────────────────────────────────────
+
+    /// Add an explicit cross-reference between two entities.
+    /// Uses INSERT OR IGNORE so calling it twice is safe.
+    fn add_entity_ref(&self, src_kind: &str, src_id: &str, tgt_kind: &str, tgt_id: &str) -> Result<()>;
+
+    /// Remove an explicit cross-reference between two entities.
+    fn remove_entity_ref(&self, src_kind: &str, src_id: &str, tgt_kind: &str, tgt_id: &str) -> Result<()>;
+
+    /// Return all entities that reference the given entity (reverse lookup).
+    fn get_backlinks(&self, target_kind: &str, target_id: &str) -> Vec<EntityRef>;
+
 }

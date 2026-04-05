@@ -58,6 +58,7 @@ enum AgendaColumn {
     Date,
     Title,
     Tags,
+    Refs,
 }
 
 impl AgendaColumn {
@@ -65,14 +66,16 @@ impl AgendaColumn {
         match self {
             Self::Date  => Self::Title,
             Self::Title => Self::Tags,
-            Self::Tags  => Self::Date,
+            Self::Tags  => Self::Refs,
+            Self::Refs  => Self::Date,
         }
     }
     fn prev(self) -> Self {
         match self {
-            Self::Date  => Self::Tags,
+            Self::Date  => Self::Refs,
             Self::Title => Self::Date,
             Self::Tags  => Self::Title,
+            Self::Refs  => Self::Tags,
         }
     }
 }
@@ -144,6 +147,7 @@ pub struct PeopleView {
 
     // 1:1 Agendas
     agendas: Vec<Agenda>,
+    agenda_backlink_counts: HashMap<String, usize>,
     agenda_cursor: usize,
     agenda_editing: bool,
     agenda_edit_col: AgendaColumn,
@@ -205,6 +209,7 @@ impl PeopleView {
             meta_add_in_key: true,
             meta_add_key: TextInput::new(),
             agendas: Vec::new(),
+            agenda_backlink_counts: HashMap::new(),
             agenda_cursor: 0,
             agenda_editing: false,
             agenda_edit_col: AgendaColumn::Date,
@@ -384,6 +389,10 @@ impl PeopleView {
         self.agenda_cursor = 0;
         let Some(person) = self.people.get(self.left_cursor) else { return; };
         self.agendas = self.store.list_agendas_for_person(&person.slug).unwrap_or_default();
+        self.agenda_backlink_counts = self.agendas
+            .iter()
+            .map(|a| (a.id.clone(), self.store.get_backlinks("agenda", &a.id).len()))
+            .collect();
         self.sort_agendas();
     }
 
@@ -413,6 +422,24 @@ impl PeopleView {
                     let ta = a.refs.tags.first().map(|s| s.as_str()).unwrap_or("");
                     let tb = b.refs.tags.first().map(|s| s.as_str()).unwrap_or("");
                     tb.cmp(ta)
+                });
+            }
+            (Some(AgendaColumn::Refs), Some(SortDirection::Ascending)) => {
+                self.agendas.sort_by(|a, b| {
+                    let ca = a.refs.tasks.len() + a.refs.notes.len() + a.refs.agendas.len()
+                        + self.agenda_backlink_counts.get(&a.id).copied().unwrap_or(0);
+                    let cb = b.refs.tasks.len() + b.refs.notes.len() + b.refs.agendas.len()
+                        + self.agenda_backlink_counts.get(&b.id).copied().unwrap_or(0);
+                    ca.cmp(&cb)
+                });
+            }
+            (Some(AgendaColumn::Refs), Some(SortDirection::Descending)) => {
+                self.agendas.sort_by(|a, b| {
+                    let ca = a.refs.tasks.len() + a.refs.notes.len() + a.refs.agendas.len()
+                        + self.agenda_backlink_counts.get(&a.id).copied().unwrap_or(0);
+                    let cb = b.refs.tasks.len() + b.refs.notes.len() + b.refs.agendas.len()
+                        + self.agenda_backlink_counts.get(&b.id).copied().unwrap_or(0);
+                    cb.cmp(&ca)
                 });
             }
             _ => {
@@ -693,6 +720,7 @@ impl PeopleView {
                 .map(|t| format!("#{}", t))
                 .collect::<Vec<_>>()
                 .join(" "),
+            AgendaColumn::Refs  => return, // read-only
         };
         self.agenda_input_cursor = val.len();
         self.agenda_input.set(val);
@@ -723,6 +751,11 @@ impl PeopleView {
                     .map(|s| s.trim_start_matches('#').to_lowercase())
                     .filter(|s| !s.is_empty())
                     .collect();
+            }
+            AgendaColumn::Refs => {
+                // Read-only; ignore
+                self.agenda_input.clear();
+                return;
             }
         }
 
@@ -882,6 +915,32 @@ impl View for PeopleView {
 }
 
 impl PeopleView {
+    /// Navigate to a specific agenda by person slug and agenda ID.
+    /// Selects the person, switches to the Agendas pane, and scrolls to the agenda.
+    pub fn navigate_to_agenda(&mut self, person_slug: &str, agenda_id: &str) {
+        self.reload();
+        if let Some(idx) = self.people.iter().position(|p| p.slug == person_slug) {
+            self.left_cursor = idx;
+            self.reload_right_side();
+            self.focus = PeopleFocus::Agendas;
+            if let Some(pos) = self.agendas.iter().position(|a| a.id == agenda_id) {
+                self.agenda_cursor = pos;
+            }
+        }
+    }
+
+    /// Return the focused agenda ID when the Agendas pane is active.
+    pub fn focused_entity_id(&self) -> Option<(crate::domain::EntityKind, String)> {
+        if self.focus == PeopleFocus::Agendas {
+            self.agendas.get(self.agenda_cursor)
+                .map(|a| (crate::domain::EntityKind::Agenda, a.id.clone()))
+        } else {
+            None
+        }
+    }
+}
+
+impl PeopleView {
     fn draw_confirm_bar(&self, frame: &mut Frame, area: Rect, theme: &Theme) {
         if let Some((_focus, ref title)) = self.confirm_delete {
             let title = truncate(title, 30);
@@ -898,10 +957,16 @@ impl PeopleView {
         match code {
             KeyCode::Tab => {
                 self.focus = self.focus.next();
+                if self.focus == PeopleFocus::Agendas {
+                    self.agenda_edit_col = AgendaColumn::Title;
+                }
                 None
             }
             KeyCode::BackTab => {
                 self.focus = self.focus.prev();
+                if self.focus == PeopleFocus::Agendas {
+                    self.agenda_edit_col = AgendaColumn::Title;
+                }
                 None
             }
             KeyCode::Char('j') | KeyCode::Down => {
@@ -1001,7 +1066,13 @@ impl PeopleView {
                     }
                     PeopleFocus::Agendas => {
                         if !self.agendas.is_empty() {
-                            if self.agenda_edit_col == AgendaColumn::Date {
+                            if self.agenda_edit_col == AgendaColumn::Refs {
+                                let agenda = &self.agendas[self.agenda_cursor];
+                                return Some(AppMessage::OpenLinkOverlay {
+                                    source_kind: EntityKind::Agenda,
+                                    source_id: agenda.id.clone(),
+                                });
+                            } else if self.agenda_edit_col == AgendaColumn::Date {
                                 let agenda = &self.agendas[self.agenda_cursor];
                                 let current = Some(agenda.date);
                                 return Some(AppMessage::OpenDatePicker {
@@ -1088,6 +1159,12 @@ impl PeopleView {
                     }
                     PeopleFocus::Agendas => {
                         if let Some(agenda) = self.agendas.get(self.agenda_cursor) {
+                            if self.agenda_edit_col == AgendaColumn::Refs {
+                                return Some(AppMessage::OpenLinkOverlay {
+                                    source_kind: EntityKind::Agenda,
+                                    source_id: agenda.id.clone(),
+                                });
+                            }
                             if self.agenda_edit_col == AgendaColumn::Date {
                                 let current = Some(agenda.date);
                                 return Some(AppMessage::OpenDatePicker {
@@ -1167,6 +1244,18 @@ impl PeopleView {
                             return Some(AppMessage::Error(format!("Failed to save person: {e}")));
                         }
                         self.reload();
+                    }
+                }
+                None
+            }
+            KeyCode::Char('x') => {
+                if self.focus == PeopleFocus::Agendas {
+                    if let Some(agenda) = self.agendas.get(self.agenda_cursor) {
+                        return Some(AppMessage::OpenRefExplorer {
+                            kind: EntityKind::Agenda,
+                            id: agenda.id.clone(),
+                            title: agenda.title.clone(),
+                        });
                     }
                 }
                 None
@@ -1611,7 +1700,7 @@ impl PeopleView {
         if focused {
             (
                 theme.title,
-                theme.title.remove_modifier(ratatui::style::Modifier::BOLD),
+                theme.accent,
             )
         } else {
             (
@@ -1905,7 +1994,8 @@ impl PeopleView {
 
         let date_w: usize = 10;
         let tags_w: usize = 14;
-        let title_w = (inner.width as usize).saturating_sub(date_w + tags_w + 3); // 1 leading + 2 separators
+        let refs_w: usize = 8;
+        let title_w = (inner.width as usize).saturating_sub(date_w + tags_w + refs_w + 4); // 1 leading + 3 separators
 
         // Sort arrows
         let date_arrow = match (self.agenda_sort_column, self.agenda_sort_direction) {
@@ -1923,6 +2013,11 @@ impl PeopleView {
             (Some(AgendaColumn::Tags), Some(SortDirection::Descending)) => " \u{2193}",
             _ => "",
         };
+        let refs_arrow = match (self.agenda_sort_column, self.agenda_sort_direction) {
+            (Some(AgendaColumn::Refs), Some(SortDirection::Ascending)) => " \u{2191}",
+            (Some(AgendaColumn::Refs), Some(SortDirection::Descending)) => " \u{2193}",
+            _ => "",
+        };
 
         // Header row
         let col_header_style = theme.column_header;
@@ -1932,7 +2027,9 @@ impl PeopleView {
             Span::styled(" ", theme.dim),
             Span::styled(format!("{:<width$}", format!("TITLE{}", title_arrow), width = title_w), col_header_style),
             Span::styled(" ", theme.dim),
-            Span::styled(format!("TAGS{}", tags_arrow), col_header_style),
+            Span::styled(format!("{:<width$}", format!("TAGS{}", tags_arrow), width = tags_w), col_header_style),
+            Span::styled(" ", theme.dim),
+            Span::styled(format!("REFS{}", refs_arrow), col_header_style),
         ]);
 
         let visible_rows = inner.height.saturating_sub(1) as usize; // 1 for header
@@ -2000,13 +2097,32 @@ impl PeopleView {
                     theme.topic
                 };
 
+                let out_count = agenda.refs.tasks.len() + agenda.refs.notes.len() + agenda.refs.agendas.len();
+                let back_count = self.agenda_backlink_counts.get(&agenda.id).copied().unwrap_or(0);
+                let refs_text = match (out_count > 0, back_count > 0) {
+                    (true, true)   => format!("󰌷{} 󱞥{}", out_count, back_count),
+                    (true, false)  => format!("󰌷{}", out_count),
+                    (false, true)  => format!("󱞥{}", back_count),
+                    (false, false) => String::new(),
+                };
+                let has_refs = out_count > 0 || back_count > 0;
+                let refs_cell_style = if is_selected && focused && self.agenda_edit_col == AgendaColumn::Refs {
+                    theme.column_focus
+                } else if has_refs {
+                    theme.accent
+                } else {
+                    theme.dim
+                };
+
                 let spans = vec![
                     Span::styled(" ", theme.dim),
                     Span::styled(date_text, date_style),
                     Span::styled(" ", theme.dim),
                     Span::styled(title_text, title_style_cell),
                     Span::styled(" ", theme.dim),
-                    Span::styled(tags_text, tags_style),
+                    Span::styled(format!("{:<width$}", tags_text, width = tags_w), tags_style),
+                    Span::styled(" ", theme.dim),
+                    Span::styled(format!("{:<width$}", refs_text, width = refs_w), refs_cell_style),
                 ];
 
                 let mut line = Line::from(spans);

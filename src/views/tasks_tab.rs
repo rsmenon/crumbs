@@ -23,6 +23,13 @@ impl TasksTab {
     }
 }
 
+impl TasksTab {
+    /// Return the ID of the currently focused task, if any.
+    pub fn focused_entity_id(&self) -> Option<String> {
+        self.list.focused_entity_id()
+    }
+}
+
 impl View for TasksTab {
     fn handle_event(&mut self, event: &Event) -> Option<AppMessage> {
         self.list.handle_event(event)

@@ -27,6 +27,8 @@ use crate::views::{
     command_palette::CommandPalette,
     nvim_overlay::NvimOverlay,
     date_picker::DatePickerOverlay,
+    link_overlay::LinkOverlay,
+    ref_explorer::RefExplorerOverlay,
 };
 use help::HelpOverlay;
 use message::DatePickerContext;
@@ -69,13 +71,13 @@ impl ActiveTab {
             Self::Tasks => &[
                 ("n", "new"), ("e", "edit"), ("d", "delete"),
                 ("Space", "status"), ("f", "filter"), ("S", "sort"),
-                ("A", "archived"),
+                ("A", "archived"), ("^L", "link"),
             ],
             Self::Calendar => &[
                 ("Enter", "day panel"), ("t", "today"), ("[/]", "month"),
             ],
             Self::Notes => &[
-                ("Enter", "open"), ("v", "preview"),
+                ("Enter", "open"), ("v", "preview"), ("^L", "link"),
             ],
             Self::People => &[
                 ("n", "new"), ("e", "rename"),
@@ -118,6 +120,8 @@ pub struct App {
 
     // Overlay views
     pub date_picker: DatePickerOverlay,
+    pub link_overlay: LinkOverlay,
+    pub ref_explorer: RefExplorerOverlay,
 
     // Overlay visibility
     pub show_sink: bool,
@@ -126,6 +130,8 @@ pub struct App {
     pub show_help: bool,
     pub show_date_picker: bool,
     pub date_picker_context: Option<DatePickerContext>,
+    pub show_link_overlay: bool,
+    pub show_ref_explorer: bool,
 
     // Shared state
     pub store: Arc<dyn Store>,
@@ -175,12 +181,16 @@ impl App {
             show_editor: false,
 
             date_picker: DatePickerOverlay::new(),
+            link_overlay: LinkOverlay::new(Arc::clone(&store)),
+            ref_explorer: RefExplorerOverlay::new(Arc::clone(&store)),
             show_sink: false,
             show_search: false,
             show_palette: false,
             show_help: false,
             show_date_picker: false,
             date_picker_context: None,
+            show_link_overlay: false,
+            show_ref_explorer: false,
 
             store,
             data_dir,
@@ -238,6 +248,25 @@ impl App {
         terminal: &mut Terminal<B>,
     ) -> Option<AppMessage> {
         use crossterm::event::{KeyCode, KeyModifiers};
+
+        // Ctrl+L opens the link overlay (works from any context, including nvim editor).
+        if key.code == KeyCode::Char('l') && key.modifiers.contains(KeyModifiers::CONTROL) {
+            if self.show_link_overlay {
+                self.show_link_overlay = false;
+            } else {
+                // Determine which entity has focus.
+                let source = if self.show_editor {
+                    self.editor.as_ref().map(|e| (e.entity_kind.clone(), e.entity_id.clone()))
+                } else {
+                    self.focused_entity()
+                };
+                if let Some((kind, id)) = source {
+                    let msg = AppMessage::OpenLinkOverlay { source_kind: kind, source_id: id };
+                    return self.handle_app_message(msg, terminal);
+                }
+            }
+            return None;
+        }
 
         // Inline nvim editor takes priority over everything else.
         if self.show_editor {
@@ -328,6 +357,18 @@ impl App {
         }
         if self.show_date_picker {
             if let Some(msg) = self.date_picker.handle_event(&crossterm::event::Event::Key(key)) {
+                return self.handle_app_message(msg, terminal);
+            }
+            return None;
+        }
+        if self.show_link_overlay {
+            if let Some(msg) = self.link_overlay.handle_event(&crossterm::event::Event::Key(key)) {
+                return self.handle_app_message(msg, terminal);
+            }
+            return None;
+        }
+        if self.show_ref_explorer {
+            if let Some(msg) = self.ref_explorer.handle_event(&crossterm::event::Event::Key(key)) {
                 return self.handle_app_message(msg, terminal);
             }
             return None;
@@ -531,7 +572,12 @@ impl App {
                 match eref.kind {
                     EntityKind::Agenda => {
                         self.active_tab = ActiveTab::People;
-                        self.people.on_tab_entered();
+                        // Look up the agenda to find its person, then navigate to it
+                        if let Ok(agenda) = self.store.get_agenda(&eref.id) {
+                            self.people.navigate_to_agenda(&agenda.person_slug, &eref.id);
+                        } else {
+                            self.people.on_tab_entered();
+                        }
                     }
                     EntityKind::Tag => {
                         self.active_tab = ActiveTab::Tasks;
@@ -636,6 +682,24 @@ impl App {
                 self.date_picker_context = None;
                 None
             }
+            AppMessage::OpenLinkOverlay { source_kind, source_id } => {
+                self.link_overlay.open(source_kind, source_id);
+                self.show_link_overlay = true;
+                None
+            }
+            AppMessage::CloseLinkOverlay => {
+                self.show_link_overlay = false;
+                None
+            }
+            AppMessage::OpenRefExplorer { kind, id, title } => {
+                self.ref_explorer.open(kind, id, title);
+                self.show_ref_explorer = true;
+                None
+            }
+            AppMessage::CloseRefExplorer => {
+                self.show_ref_explorer = false;
+                None
+            }
             _ => None,
         }
     }
@@ -693,6 +757,8 @@ impl App {
         self.show_palette = false;
         self.show_date_picker = false;
         self.date_picker_context = None;
+        self.show_link_overlay = false;
+        self.show_ref_explorer = false;
     }
 
     pub fn process_pending_messages(&mut self) {
@@ -721,6 +787,25 @@ impl App {
                     self.broadcast_message(&AppMessage::Reload);
                 }
             }
+        }
+    }
+
+    /// Return the currently focused entity (kind + id) based on the active tab,
+    /// or None if no entity is focused or focus can't be determined.
+    fn focused_entity(&self) -> Option<(crate::domain::EntityKind, String)> {
+        use crate::domain::EntityKind;
+        match self.active_tab {
+            ActiveTab::Tasks => {
+                self.tasks_tab.focused_entity_id()
+                    .map(|id| (EntityKind::Task, id))
+            }
+            ActiveTab::Notes => {
+                self.notes.focused_entity_id()
+                    .map(|id| (EntityKind::Note, id))
+            }
+            ActiveTab::Calendar => self.calendar.focused_entity_id(),
+            ActiveTab::People => self.people.focused_entity_id(),
+            _ => None,
         }
     }
 
@@ -868,6 +953,16 @@ impl App {
         if self.show_date_picker {
             self.date_picker.draw(frame, area, &self.theme);
         }
+
+        // Link overlay floats on top of everything.
+        if self.show_link_overlay {
+            self.link_overlay.draw(frame, area, &self.theme);
+        }
+
+        // Ref explorer floats on top of everything.
+        if self.show_ref_explorer {
+            self.ref_explorer.draw(frame, area, &self.theme);
+        }
     }
 
     fn render_status_bar(&self, frame: &mut Frame, area: ratatui::layout::Rect) {
@@ -908,7 +1003,13 @@ impl App {
         }
 
         // Hint pairs: key in accent, description in dim, separated by "  "
-        for (i, (key, desc)) in self.active_tab.status_hints().iter().enumerate() {
+        // Calendar uses dynamic hints based on focused pane; other tabs use static hints.
+        let hints: Vec<(&str, &str)> = if self.active_tab == ActiveTab::Calendar {
+            self.calendar.status_hints().to_vec()
+        } else {
+            self.active_tab.status_hints().to_vec()
+        };
+        for (i, (key, desc)) in hints.iter().enumerate() {
             if i > 0 {
                 spans.push(Span::styled("  ", self.theme.dim));
             }

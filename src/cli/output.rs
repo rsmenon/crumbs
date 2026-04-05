@@ -145,6 +145,28 @@ pub struct DeleteResult {
     pub deleted: String,
 }
 
+#[derive(Serialize)]
+pub struct LinkEntry {
+    pub kind: String,
+    pub id: String,
+    pub title: String,
+}
+
+#[derive(Serialize)]
+pub struct LinksOutput {
+    pub linked: Vec<LinkEntry>,
+    pub backlinks: Vec<LinkEntry>,
+}
+
+#[derive(Serialize)]
+pub struct LinkActionResult {
+    pub source_kind: String,
+    pub source_id: String,
+    pub target_kind: String,
+    pub target_id: String,
+    pub action: String,
+}
+
 pub fn print_json<T: serde::Serialize>(out: &mut dyn std::io::Write, value: &T) -> anyhow::Result<()> {
     writeln!(out, "{}", serde_json::to_string_pretty(value)?)?;
     Ok(())

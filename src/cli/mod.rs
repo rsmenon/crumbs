@@ -11,8 +11,8 @@ use crate::domain::{new_id, Agenda, EntityKind, EntityRef, Note, Person, Refs, T
 use crate::store::Store;
 
 use output::{
-    AgendaOutput, DeleteResult, NoteOutput, PersonOutput, SearchResult, TagOutput, TaskOutput,
-    print_json,
+    AgendaOutput, DeleteResult, LinkActionResult, LinkEntry, LinksOutput, NoteOutput, PersonOutput,
+    SearchResult, TagOutput, TaskOutput, print_json,
 };
 
 // ── Clap definitions ─────────────────────────────────────────────────────────
@@ -133,6 +133,24 @@ pub(crate) enum TaskAction {
     },
     /// Delete a task
     Delete { id: String },
+    /// Link a task to another entity (task, note, or agenda)
+    Link {
+        id: String,
+        target_id: String,
+        /// Target entity kind: task, note, or agenda (auto-detected if omitted)
+        #[arg(long)]
+        kind: Option<String>,
+    },
+    /// Remove a link from a task to another entity
+    Unlink {
+        id: String,
+        target_id: String,
+        /// Target entity kind: task, note, or agenda (auto-detected if omitted)
+        #[arg(long)]
+        kind: Option<String>,
+    },
+    /// List outgoing links and backlinks for a task
+    Links { id: String },
 }
 
 // ── Note subcommands ──────────────────────────────────────────────────────────
@@ -178,6 +196,24 @@ pub(crate) enum NoteAction {
     },
     /// Delete a note
     Delete { id: String },
+    /// Link a note to another entity (task, note, or agenda)
+    Link {
+        id: String,
+        target_id: String,
+        /// Target entity kind: task, note, or agenda (auto-detected if omitted)
+        #[arg(long)]
+        kind: Option<String>,
+    },
+    /// Remove a link from a note to another entity
+    Unlink {
+        id: String,
+        target_id: String,
+        /// Target entity kind: task, note, or agenda (auto-detected if omitted)
+        #[arg(long)]
+        kind: Option<String>,
+    },
+    /// List outgoing links and backlinks for a note
+    Links { id: String },
 }
 
 // ── Person subcommands ────────────────────────────────────────────────────────
@@ -267,6 +303,24 @@ pub(crate) enum AgendaAction {
     },
     /// Delete an agenda
     Delete { id: String },
+    /// Link an agenda to another entity (task, note, or agenda)
+    Link {
+        id: String,
+        target_id: String,
+        /// Target entity kind: task, note, or agenda (auto-detected if omitted)
+        #[arg(long)]
+        kind: Option<String>,
+    },
+    /// Remove a link from an agenda to another entity
+    Unlink {
+        id: String,
+        target_id: String,
+        /// Target entity kind: task, note, or agenda (auto-detected if omitted)
+        #[arg(long)]
+        kind: Option<String>,
+    },
+    /// List outgoing links and backlinks for an agenda
+    Links { id: String },
 }
 
 // ── Helper functions ──────────────────────────────────────────────────────────
@@ -329,6 +383,72 @@ fn entity_kind_str(kind: &EntityKind) -> &'static str {
         EntityKind::Tag => "tag",
         EntityKind::Agenda => "agenda",
     }
+}
+
+/// Resolve a target entity's kind from an optional hint string.
+/// If `kind_hint` is given, parse it; otherwise probe the store (task → note → agenda).
+fn resolve_target_kind(store: &dyn Store, id: &str, kind_hint: Option<&str>) -> anyhow::Result<EntityKind> {
+    if let Some(k) = kind_hint {
+        return match k {
+            "task" => Ok(EntityKind::Task),
+            "note" => Ok(EntityKind::Note),
+            "agenda" => Ok(EntityKind::Agenda),
+            other => Err(anyhow!("unknown entity kind '{other}'; expected task, note, or agenda")),
+        };
+    }
+    // Auto-detect: try each type in order
+    if store.get_task(id).is_ok() { return Ok(EntityKind::Task); }
+    if store.get_note(id).is_ok() { return Ok(EntityKind::Note); }
+    if store.get_agenda(id).is_ok() { return Ok(EntityKind::Agenda); }
+    Err(anyhow!("entity '{id}' not found as task, note, or agenda"))
+}
+
+/// Build a LinksOutput for any source entity.
+fn build_links_output(store: &dyn Store, src_kind: &str, src_id: &str) -> anyhow::Result<LinksOutput> {
+    // Outgoing links: load the entity's refs
+    let refs = match src_kind {
+        "task" => {
+            let t = store.get_task(src_id)?;
+            t.refs
+        }
+        "note" => {
+            let n = store.get_note(src_id)?;
+            n.refs
+        }
+        "agenda" => {
+            let a = store.get_agenda(src_id)?;
+            a.refs
+        }
+        other => return Err(anyhow!("unsupported source kind '{other}'")),
+    };
+
+    let mut linked = Vec::new();
+    for id in &refs.tasks {
+        let title = store.get_task(id).ok().map(|t| t.title).unwrap_or_default();
+        linked.push(LinkEntry { kind: "task".into(), id: id.clone(), title });
+    }
+    for id in &refs.notes {
+        let title = store.get_note(id).ok().map(|n| n.title).unwrap_or_default();
+        linked.push(LinkEntry { kind: "note".into(), id: id.clone(), title });
+    }
+    for id in &refs.agendas {
+        let title = store.get_agenda(id).ok().map(|a| a.title).unwrap_or_default();
+        linked.push(LinkEntry { kind: "agenda".into(), id: id.clone(), title });
+    }
+
+    let raw_backlinks = store.get_backlinks(src_kind, src_id);
+    let mut backlinks = Vec::new();
+    for eref in raw_backlinks {
+        let (kind_str, title) = match &eref.kind {
+            EntityKind::Task => ("task", store.get_task(&eref.id).ok().map(|t| t.title).unwrap_or_default()),
+            EntityKind::Note => ("note", store.get_note(&eref.id).ok().map(|n| n.title).unwrap_or_default()),
+            EntityKind::Agenda => ("agenda", store.get_agenda(&eref.id).ok().map(|a| a.title).unwrap_or_default()),
+            _ => continue,
+        };
+        backlinks.push(LinkEntry { kind: kind_str.into(), id: eref.id.clone(), title });
+    }
+
+    Ok(LinksOutput { linked, backlinks })
 }
 
 // ── execute() ────────────────────────────────────────────────────────────────
@@ -453,6 +573,34 @@ pub fn execute_to(out: &mut dyn Write, command: Command, store: Arc<dyn Store>) 
                 store.delete_task(&id)?;
                 print_json(out,&DeleteResult { deleted: id })
             }
+            TaskAction::Link { id, target_id, kind } => {
+                let target_kind = resolve_target_kind(store.as_ref(), &target_id, kind.as_deref())?;
+                let tgt_kind_str = entity_kind_str(&target_kind);
+                store.add_entity_ref("task", &id, tgt_kind_str, &target_id)?;
+                print_json(out, &LinkActionResult {
+                    source_kind: "task".into(),
+                    source_id: id,
+                    target_kind: tgt_kind_str.into(),
+                    target_id,
+                    action: "linked".into(),
+                })
+            }
+            TaskAction::Unlink { id, target_id, kind } => {
+                let target_kind = resolve_target_kind(store.as_ref(), &target_id, kind.as_deref())?;
+                let tgt_kind_str = entity_kind_str(&target_kind);
+                store.remove_entity_ref("task", &id, tgt_kind_str, &target_id)?;
+                print_json(out, &LinkActionResult {
+                    source_kind: "task".into(),
+                    source_id: id,
+                    target_kind: tgt_kind_str.into(),
+                    target_id,
+                    action: "unlinked".into(),
+                })
+            }
+            TaskAction::Links { id } => {
+                let result = build_links_output(store.as_ref(), "task", &id)?;
+                print_json(out, &result)
+            }
         },
 
         // ── Notes ─────────────────────────────────────────────────────────────
@@ -530,6 +678,34 @@ pub fn execute_to(out: &mut dyn Write, command: Command, store: Arc<dyn Store>) 
             NoteAction::Delete { id } => {
                 store.delete_note(&id)?;
                 print_json(out,&DeleteResult { deleted: id })
+            }
+            NoteAction::Link { id, target_id, kind } => {
+                let target_kind = resolve_target_kind(store.as_ref(), &target_id, kind.as_deref())?;
+                let tgt_kind_str = entity_kind_str(&target_kind);
+                store.add_entity_ref("note", &id, tgt_kind_str, &target_id)?;
+                print_json(out, &LinkActionResult {
+                    source_kind: "note".into(),
+                    source_id: id,
+                    target_kind: tgt_kind_str.into(),
+                    target_id,
+                    action: "linked".into(),
+                })
+            }
+            NoteAction::Unlink { id, target_id, kind } => {
+                let target_kind = resolve_target_kind(store.as_ref(), &target_id, kind.as_deref())?;
+                let tgt_kind_str = entity_kind_str(&target_kind);
+                store.remove_entity_ref("note", &id, tgt_kind_str, &target_id)?;
+                print_json(out, &LinkActionResult {
+                    source_kind: "note".into(),
+                    source_id: id,
+                    target_kind: tgt_kind_str.into(),
+                    target_id,
+                    action: "unlinked".into(),
+                })
+            }
+            NoteAction::Links { id } => {
+                let result = build_links_output(store.as_ref(), "note", &id)?;
+                print_json(out, &result)
             }
         },
 
@@ -680,6 +856,34 @@ pub fn execute_to(out: &mut dyn Write, command: Command, store: Arc<dyn Store>) 
             AgendaAction::Delete { id } => {
                 store.delete_agenda(&id)?;
                 print_json(out,&DeleteResult { deleted: id })
+            }
+            AgendaAction::Link { id, target_id, kind } => {
+                let target_kind = resolve_target_kind(store.as_ref(), &target_id, kind.as_deref())?;
+                let tgt_kind_str = entity_kind_str(&target_kind);
+                store.add_entity_ref("agenda", &id, tgt_kind_str, &target_id)?;
+                print_json(out, &LinkActionResult {
+                    source_kind: "agenda".into(),
+                    source_id: id,
+                    target_kind: tgt_kind_str.into(),
+                    target_id,
+                    action: "linked".into(),
+                })
+            }
+            AgendaAction::Unlink { id, target_id, kind } => {
+                let target_kind = resolve_target_kind(store.as_ref(), &target_id, kind.as_deref())?;
+                let tgt_kind_str = entity_kind_str(&target_kind);
+                store.remove_entity_ref("agenda", &id, tgt_kind_str, &target_id)?;
+                print_json(out, &LinkActionResult {
+                    source_kind: "agenda".into(),
+                    source_id: id,
+                    target_kind: tgt_kind_str.into(),
+                    target_id,
+                    action: "unlinked".into(),
+                })
+            }
+            AgendaAction::Links { id } => {
+                let result = build_links_output(store.as_ref(), "agenda", &id)?;
+                print_json(out, &result)
             }
         },
 
@@ -1203,5 +1407,146 @@ mod tests {
         assert_eq!(arr.len(), 1);
         assert_eq!(arr[0]["kind"], "task");
         assert_eq!(arr[0]["title"], "Fix the login bug");
+    }
+
+    // ── Refs (link / unlink / links) ─────────────────────────────────────────
+
+    fn add_task(store: Arc<dyn Store>, title: &str) -> String {
+        let v = json(&run(Arc::clone(&store), Command::Task {
+            action: TaskAction::Add {
+                title: title.into(),
+                status: None, priority: None, due: None,
+                body: None, body_stdin: false, private: false, pinned: false,
+            },
+        }));
+        v["id"].as_str().expect("task missing id").to_owned()
+    }
+
+    fn add_note(store: Arc<dyn Store>, title: &str) -> String {
+        let v = json(&run(Arc::clone(&store), Command::Note {
+            action: NoteAction::Add {
+                title: title.into(),
+                body: None, body_stdin: false, private: false, pinned: false,
+            },
+        }));
+        v["id"].as_str().expect("note missing id").to_owned()
+    }
+
+    #[test]
+    fn task_link_creates_ref_and_appears_in_links() {
+        let (store, _dir) = test_store();
+        let task_id = add_task(Arc::clone(&store), "Task A");
+        let note_id = add_note(Arc::clone(&store), "Note B");
+
+        // Link task → note (auto-detect kind)
+        let linked = json(&run(Arc::clone(&store), Command::Task {
+            action: TaskAction::Link {
+                id: task_id.clone(),
+                target_id: note_id.clone(),
+                kind: None,
+            },
+        }));
+        assert_eq!(linked["action"], "linked");
+        assert_eq!(linked["source_kind"], "task");
+        assert_eq!(linked["target_kind"], "note");
+        assert_eq!(linked["target_id"], note_id);
+
+        // Check outgoing links
+        let links = json(&run(Arc::clone(&store), Command::Task {
+            action: TaskAction::Links { id: task_id.clone() },
+        }));
+        let outgoing = links["linked"].as_array().expect("linked should be array");
+        assert_eq!(outgoing.len(), 1);
+        assert_eq!(outgoing[0]["kind"], "note");
+        assert_eq!(outgoing[0]["id"], note_id);
+        assert_eq!(outgoing[0]["title"], "Note B");
+
+        // Backlinks: note should now show the task as a backlink
+        let note_links = json(&run(Arc::clone(&store), Command::Note {
+            action: NoteAction::Links { id: note_id.clone() },
+        }));
+        let backlinks = note_links["backlinks"].as_array().expect("backlinks should be array");
+        assert_eq!(backlinks.len(), 1);
+        assert_eq!(backlinks[0]["kind"], "task");
+        assert_eq!(backlinks[0]["id"], task_id);
+    }
+
+    #[test]
+    fn task_unlink_removes_ref() {
+        let (store, _dir) = test_store();
+        let task_id = add_task(Arc::clone(&store), "Task A");
+        let note_id = add_note(Arc::clone(&store), "Note B");
+
+        // Link then unlink
+        run(Arc::clone(&store), Command::Task {
+            action: TaskAction::Link {
+                id: task_id.clone(), target_id: note_id.clone(), kind: None,
+            },
+        });
+        let unlinked = json(&run(Arc::clone(&store), Command::Task {
+            action: TaskAction::Unlink {
+                id: task_id.clone(), target_id: note_id.clone(), kind: None,
+            },
+        }));
+        assert_eq!(unlinked["action"], "unlinked");
+
+        // Links should now be empty
+        let links = json(&run(Arc::clone(&store), Command::Task {
+            action: TaskAction::Links { id: task_id.clone() },
+        }));
+        assert!(links["linked"].as_array().expect("linked should be array").is_empty());
+    }
+
+    #[test]
+    fn task_link_with_explicit_kind_flag() {
+        let (store, _dir) = test_store();
+        let task_a = add_task(Arc::clone(&store), "Task A");
+        let task_b = add_task(Arc::clone(&store), "Task B");
+
+        let linked = json(&run(Arc::clone(&store), Command::Task {
+            action: TaskAction::Link {
+                id: task_a.clone(),
+                target_id: task_b.clone(),
+                kind: Some("task".into()),
+            },
+        }));
+        assert_eq!(linked["target_kind"], "task");
+
+        let links = json(&run(Arc::clone(&store), Command::Task {
+            action: TaskAction::Links { id: task_a },
+        }));
+        let outgoing = links["linked"].as_array().expect("linked should be array");
+        assert_eq!(outgoing.len(), 1);
+        assert_eq!(outgoing[0]["kind"], "task");
+        assert_eq!(outgoing[0]["title"], "Task B");
+    }
+
+    #[test]
+    fn task_links_empty_when_no_refs() {
+        let (store, _dir) = test_store();
+        let task_id = add_task(Arc::clone(&store), "Lonely task");
+
+        let links = json(&run(Arc::clone(&store), Command::Task {
+            action: TaskAction::Links { id: task_id },
+        }));
+        assert!(links["linked"].as_array().expect("linked should be array").is_empty());
+        assert!(links["backlinks"].as_array().expect("backlinks should be array").is_empty());
+    }
+
+    #[test]
+    fn task_link_invalid_kind_returns_error() {
+        let (store, _dir) = test_store();
+        let task_id = add_task(Arc::clone(&store), "Task A");
+        let note_id = add_note(Arc::clone(&store), "Note B");
+
+        let mut buf = Vec::<u8>::new();
+        let result = execute_to(&mut buf, Command::Task {
+            action: TaskAction::Link {
+                id: task_id,
+                target_id: note_id,
+                kind: Some("person".into()),  // invalid for linking
+            },
+        }, Arc::clone(&store));
+        assert!(result.is_err());
     }
 }

@@ -75,6 +75,18 @@ pub enum AppMessage {
     /// The user cancelled the picker without selecting.
     DatePickerCancel,
 
+    // ── Link overlay ─────────────────────────────────────────────
+    /// Open the link overlay for a specific entity so the user can link it to another.
+    OpenLinkOverlay { source_kind: EntityKind, source_id: String },
+    /// Close the link overlay.
+    CloseLinkOverlay,
+
+    // ── Ref explorer overlay ──────────────────────────────────────
+    /// Open the ref explorer for a specific entity.
+    OpenRefExplorer { kind: EntityKind, id: String, title: String },
+    /// Close the ref explorer.
+    CloseRefExplorer,
+
     // ── System ────────────────────────────────────────────────────
     /// Quit the application.
     Quit,

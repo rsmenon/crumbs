@@ -28,8 +28,9 @@ enum MetadataSnapshot {
 }
 
 impl MetadataSnapshot {
-    /// Number of rows the header occupies (title + metadata rows + separator).
-    fn header_height(&self) -> u16 {
+    /// Number of base rows the header occupies (title + metadata rows + sep),
+    /// not counting linked/backlinks rows.
+    fn base_header_height(&self) -> u16 {
         match self {
             // title + 8 fields (status/priority/due/tags/private/pinned/created/modified) + sep
             MetadataSnapshot::Task(_) => 10,
@@ -41,12 +42,19 @@ impl MetadataSnapshot {
     }
 }
 
+/// A resolved entity for the Linked / Refs rows in the header.
+#[derive(Clone)]
+struct ResolvedRef {
+    icon: &'static str,
+    title: String,
+}
+
 // ── NvimOverlay ──────────────────────────────────────────────────
 
 pub struct NvimOverlay {
     bridge: NvimBridge,
 
-    entity_id: String,
+    pub entity_id: String,
     pub entity_kind: EntityKind,
 
     /// Absolute path of the file open in nvim.
@@ -60,6 +68,11 @@ pub struct NvimOverlay {
     metadata: MetadataSnapshot,
     /// Rows reserved for the metadata header (data rows + separator).
     header_height: u16,
+
+    /// Entities this entity links to (resolved for display).
+    linked: Vec<ResolvedRef>,
+    /// Entities that link back to this entity (resolved for display).
+    backlinks: Vec<ResolvedRef>,
 }
 
 impl NvimOverlay {
@@ -84,7 +97,14 @@ impl NvimOverlay {
             &data_dir,
         )?;
 
-        let header_height = metadata.header_height();
+        // Load linked entities and backlinks for display in the header.
+        let (linked, backlinks) = load_ref_display(&entity_id, &entity_kind, &store);
+
+        let base_h = metadata.base_header_height();
+        let value_w = (width as usize).saturating_sub(NVIM_META_PREFIX_W);
+        let extra = ref_row_count(&linked, value_w) + ref_row_count(&backlinks, value_w);
+        let header_height = base_h + extra as u16;
+
         let nvim_height = height.saturating_sub(header_height).max(1);
         let bridge = NvimBridge::spawn(width, nvim_height)?;
         bridge.open_file(file_path.clone());
@@ -98,6 +118,8 @@ impl NvimOverlay {
             store,
             metadata,
             header_height,
+            linked,
+            backlinks,
         })
     }
 
@@ -180,7 +202,7 @@ impl NvimOverlay {
                     )),
                     None => Line::from(Span::styled("—", theme.dim)),
                 };
-                vec![
+                let mut rows = vec![
                     title_row(task.title.clone(), theme),
                     meta_row("󰄲", "Status",   status_val,                       theme),
                     meta_row("󰓅", "Priority", priority_val,                     theme),
@@ -190,29 +212,41 @@ impl NvimOverlay {
                     meta_row("󰐃", "Pinned",   bool_val(task.pinned, theme),     theme),
                     meta_row("󰃳", "Created",  datetime_val(task.created_at),    theme),
                     meta_row("󰢧", "Modified", datetime_val(task.updated_at),    theme),
-                    separator_row(area.width, theme),
-                ]
+                ];
+                let value_w = (area.width as usize).saturating_sub(NVIM_META_PREFIX_W);
+                rows.extend(refs_lines("󰌷", "Linked",    &self.linked,    value_w, theme));
+                rows.extend(refs_lines("󱞥", "Backlinks", &self.backlinks, value_w, theme));
+                rows.push(separator_row(area.width, theme));
+                rows
             }
             MetadataSnapshot::Note(note) => {
-                vec![
+                let mut rows = vec![
                     title_row(note.title.clone(), theme),
                     meta_row("󰓹", "Tags",     tags_val(&note.refs.tags, theme), theme),
                     meta_row("󰌾", "Private",  bool_val(note.private, theme),    theme),
                     meta_row("󰐃", "Pinned",   bool_val(note.pinned, theme),     theme),
                     meta_row("󰃳", "Created",  datetime_val(note.created_at),    theme),
                     meta_row("󰢧", "Modified", datetime_val(note.updated_at),    theme),
-                    separator_row(area.width, theme),
-                ]
+                ];
+                let value_w = (area.width as usize).saturating_sub(NVIM_META_PREFIX_W);
+                rows.extend(refs_lines("󰌷", "Linked",    &self.linked,    value_w, theme));
+                rows.extend(refs_lines("󱞥", "Backlinks", &self.backlinks, value_w, theme));
+                rows.push(separator_row(area.width, theme));
+                rows
             }
             MetadataSnapshot::Agenda(agenda) => {
-                vec![
+                let mut rows = vec![
                     title_row(agenda.title.clone(), theme),
                     meta_row("󰀄", "Person", Line::from(Span::styled(agenda.person_slug.clone(), theme.person)), theme),
                     meta_row("󰃭", "Date",   Line::from(Span::styled(agenda.date.format("%Y-%m-%d").to_string(), theme.date)), theme),
                     meta_row("󰃳", "Created",  datetime_val(agenda.created_at), theme),
                     meta_row("󰢧", "Modified", datetime_val(agenda.updated_at), theme),
-                    separator_row(area.width, theme),
-                ]
+                ];
+                let value_w = (area.width as usize).saturating_sub(NVIM_META_PREFIX_W);
+                rows.extend(refs_lines("󰌷", "Linked",    &self.linked,    value_w, theme));
+                rows.extend(refs_lines("󱞥", "Backlinks", &self.backlinks, value_w, theme));
+                rows.push(separator_row(area.width, theme));
+                rows
             }
         };
 
@@ -328,6 +362,14 @@ impl NvimOverlay {
     }
 }
 
+impl Drop for NvimOverlay {
+    fn drop(&mut self) {
+        if self.is_temp_file {
+            let _ = std::fs::remove_file(&self.file_path);
+        }
+    }
+}
+
 // ── Header render helpers ─────────────────────────────────────────
 
 /// Title row: bold, full width, indented.
@@ -379,7 +421,152 @@ fn datetime_val(dt: chrono::DateTime<chrono::Utc>) -> Line<'static> {
     Line::from(dt.format("%Y-%m-%d %H:%M").to_string())
 }
 
+/// Visual prefix width for a meta row: 2 indent + 2 glyph + 2 gap + 10 key = 16.
+const NVIM_META_PREFIX_W: usize = 16;
+
+/// Build the display parts for refs (one string per ref entry).
+fn ref_parts(refs: &[ResolvedRef]) -> Vec<String> {
+    refs.iter()
+        .map(|r| format!("{} {}", r.icon, truncate_str(&r.title, 24)))
+        .collect()
+}
+
+/// Number of rows needed to display `refs` within `value_w` columns.
+fn ref_row_count(refs: &[ResolvedRef], value_w: usize) -> usize {
+    let parts = ref_parts(refs);
+    pack_ref_lines(&parts, value_w).len()
+}
+
+/// Pack ref display strings into lines fitting within `value_w` chars.
+fn pack_ref_lines(parts: &[String], value_w: usize) -> Vec<String> {
+    if parts.is_empty() {
+        return Vec::new();
+    }
+    if value_w == 0 {
+        return parts.to_vec();
+    }
+    let mut lines: Vec<String> = Vec::new();
+    let mut current = String::new();
+    for part in parts {
+        let needed = if current.is_empty() { 0 } else { 2 } + part.chars().count();
+        if !current.is_empty() && current.chars().count() + needed > value_w {
+            lines.push(current.clone());
+            current = part.clone();
+        } else {
+            if !current.is_empty() { current.push_str("  "); }
+            current.push_str(part);
+        }
+    }
+    if !current.is_empty() { lines.push(current); }
+    lines
+}
+
+/// Render refs as one or more `Line`s: first line has glyph + label, subsequent
+/// lines are indented to the value column (continuation rows).
+fn refs_lines<'a>(
+    glyph: &'static str,
+    label: &'static str,
+    refs: &[ResolvedRef],
+    value_w: usize,
+    theme: &Theme,
+) -> Vec<Line<'a>> {
+    if refs.is_empty() {
+        return Vec::new();
+    }
+    let parts = ref_parts(refs);
+    let packed = pack_ref_lines(&parts, value_w);
+    let mut out: Vec<Line<'a>> = Vec::new();
+    for (i, line_str) in packed.into_iter().enumerate() {
+        if i == 0 {
+            out.push(meta_row(glyph, label, Line::from(Span::styled(line_str, theme.dim)), theme));
+        } else {
+            out.push(Line::from(vec![
+                Span::raw(" ".repeat(NVIM_META_PREFIX_W)),
+                Span::styled(line_str, theme.dim),
+            ]));
+        }
+    }
+    out
+}
+
 // ── File preparation ──────────────────────────────────────────────
+
+fn truncate_str(s: &str, n: usize) -> String {
+    if s.chars().count() <= n {
+        s.to_string()
+    } else {
+        match s.char_indices().nth(n.saturating_sub(1)) {
+            Some((idx, _)) => format!("{}…", &s[..idx]),
+            None => s.to_string(),
+        }
+    }
+}
+
+/// Resolve linked entities and backlinks for display in the nvim header.
+/// Returns (linked, backlinks) as (icon, title, kind_label) tuples.
+fn load_ref_display(
+    entity_id: &str,
+    entity_kind: &EntityKind,
+    store: &Arc<dyn Store>,
+) -> (Vec<ResolvedRef>, Vec<ResolvedRef>) {
+    use super::icons;
+
+    let kind_str = match entity_kind {
+        EntityKind::Task => "task",
+        EntityKind::Note => "note",
+        EntityKind::Agenda => "agenda",
+        _ => return (vec![], vec![]),
+    };
+
+    // Resolve a single EntityRef into a ResolvedRef.
+    let resolve = |eref: &crate::domain::EntityRef| -> Option<ResolvedRef> {
+        match eref.kind {
+            EntityKind::Task => {
+                let t = store.get_task(&eref.id).ok()?;
+                Some(ResolvedRef { icon: icons::TASK, title: t.title })
+            }
+            EntityKind::Note => {
+                let n = store.get_note(&eref.id).ok()?;
+                Some(ResolvedRef { icon: icons::NOTE, title: n.title })
+            }
+            EntityKind::Agenda => {
+                let a = store.get_agenda(&eref.id).ok()?;
+                Some(ResolvedRef { icon: icons::AGENDA, title: a.title })
+            }
+            _ => None,
+        }
+    };
+
+    // Load outgoing links from the entity's refs.
+    let linked: Vec<ResolvedRef> = {
+        let refs = match entity_kind {
+            EntityKind::Task => store.get_task(entity_id).ok().map(|t| t.refs),
+            EntityKind::Note => store.get_note(entity_id).ok().map(|n| n.refs),
+            EntityKind::Agenda => store.get_agenda(entity_id).ok().map(|a| a.refs),
+            _ => None,
+        }.unwrap_or_default();
+
+        let task_refs = refs.tasks.iter().filter_map(|id| {
+            store.get_task(id).ok().map(|t| ResolvedRef { icon: icons::TASK, title: t.title })
+        });
+        let note_refs = refs.notes.iter().filter_map(|id| {
+            store.get_note(id).ok().map(|n| ResolvedRef { icon: icons::NOTE, title: n.title })
+        });
+        let agenda_refs = refs.agendas.iter().filter_map(|id| {
+            store.get_agenda(id).ok().map(|a| ResolvedRef { icon: icons::AGENDA, title: a.title })
+        });
+        task_refs.chain(note_refs).chain(agenda_refs).collect()
+    };
+
+    // Load incoming links (backlinks).
+    let backlinks: Vec<ResolvedRef> = store
+        .get_backlinks(kind_str, entity_id)
+        .iter()
+        .filter_map(|eref| resolve(eref))
+        .collect();
+
+    (linked, backlinks)
+}
 
 /// Write only the body/description to a temp file and return the entity
 /// snapshot for the metadata header.

@@ -604,21 +604,35 @@ impl SinkOverlay {
             (" ", "") // cursor at end: show a space placeholder
         };
 
-        // Compute visible window: if the input is wider than available space,
-        // scroll so the cursor is visible.
-        let cursor_display_pos = before.len();
-        let total_display = before.len() + cursor_ch.len() + after.len();
+        // Compute visible window using char counts (not byte offsets) to avoid
+        // panicking on multi-byte UTF-8.
+        let before_chars = before.chars().count();
+        let cursor_chars = cursor_ch.chars().count();
+        let after_chars = after.chars().count();
+        let total_chars = before_chars + cursor_chars + after_chars;
 
         // Simple approach: if total fits, show everything; otherwise trim from left.
-        let (vis_before, vis_cursor, vis_after) = if total_display <= avail {
+        let (vis_before, vis_cursor, vis_after) = if total_chars <= avail {
             (before.to_string(), cursor_ch.to_string(), after.to_string())
         } else {
             // Ensure cursor is visible by showing up to `avail` chars around it.
-            let start = cursor_display_pos.saturating_sub(avail / 2);
-            let end_bound = (start + avail).min(self.input.len());
-            let visible_input = &self.input[start..end_bound];
-            if self.cursor >= start && self.cursor < end_bound {
-                let local_cursor = self.cursor - start;
+            // Work in char indices, then convert back to byte offsets.
+            let skip_chars = before_chars.saturating_sub(avail / 2);
+            let window_chars = avail;
+
+            // Collect char indices for the full input.
+            let char_indices: Vec<(usize, char)> = self.input.char_indices().collect();
+            let total_input_chars = char_indices.len();
+
+            let start_char = skip_chars;
+            let end_char = (start_char + window_chars).min(total_input_chars);
+
+            let start_byte = char_indices.get(start_char).map(|(b, _)| *b).unwrap_or(self.input.len());
+            let end_byte = char_indices.get(end_char).map(|(b, _)| *b).unwrap_or(self.input.len());
+
+            let visible_input = &self.input[start_byte..end_byte];
+            if self.cursor >= start_byte && self.cursor < end_byte {
+                let local_cursor = self.cursor - start_byte;
                 let vb = &visible_input[..local_cursor];
                 let mut ce = local_cursor + 1;
                 while ce < visible_input.len() && !visible_input.is_char_boundary(ce) {
