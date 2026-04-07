@@ -873,8 +873,17 @@ impl App {
     }
 
     fn render_tab_bar(&self, frame: &mut Frame, area: ratatui::layout::Rect) {
+        use ratatui::layout::{Constraint, Direction, Layout};
         use ratatui::style::{Color, Modifier, Style};
         use ratatui::text::{Line, Span};
+
+        let version = concat!("v", env!("CARGO_PKG_VERSION"));
+        let version_width = version.len() as u16 + 1; // +1 for trailing space
+
+        let chunks = Layout::default()
+            .direction(Direction::Horizontal)
+            .constraints([Constraint::Min(0), Constraint::Length(version_width)])
+            .split(area);
 
         let logo_style = Style::default()
             .fg(Color::Rgb(0x68, 0x9d, 0x6a))
@@ -906,7 +915,14 @@ impl App {
         }
 
         let line = Line::from(spans);
-        frame.render_widget(ratatui::widgets::Paragraph::new(line), area);
+        frame.render_widget(ratatui::widgets::Paragraph::new(line), chunks[0]);
+
+        let version_style = self.theme.dim;
+        let version_line = Line::from(Span::styled(version, version_style));
+        frame.render_widget(
+            ratatui::widgets::Paragraph::new(version_line),
+            chunks[1],
+        );
     }
 
     fn render_separator(&self, frame: &mut Frame, area: ratatui::layout::Rect) {

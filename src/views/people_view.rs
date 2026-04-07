@@ -266,12 +266,13 @@ impl PeopleView {
             }
         }
 
-        // Sort people by frecency (descending), fall back to slug for ties
+        // Sort people: pinned first (by frecency within group), then unpinned (by frecency)
         let frecency = self.store.person_frecency_scores();
         self.people.sort_by(|a, b| {
             let sa = frecency.get(&a.slug).copied().unwrap_or(0.0);
             let sb = frecency.get(&b.slug).copied().unwrap_or(0.0);
-            sb.partial_cmp(&sa).unwrap_or(std::cmp::Ordering::Equal)
+            b.pinned.cmp(&a.pinned)
+                .then_with(|| sb.partial_cmp(&sa).unwrap_or(std::cmp::Ordering::Equal))
                 .then_with(|| a.slug.cmp(&b.slug))
         });
 
